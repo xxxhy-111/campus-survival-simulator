@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>校园生存模拟器</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- ===================== 封面页 ===================== -->
+  <div id="page-cover" class="page active">
+    <div id="game-container">
+      <canvas id="cover-canvas" width="960" height="540"></canvas>
+
+      <div class="title-area">
+        <h1 class="game-title">校园生存模拟器</h1>
+        <p class="game-subtitle">—— 科技大学篇 · 计算机系新生的逆袭 ——</p>
+      </div>
+
+      <div class="menu-area">
+        <button class="pixel-btn" id="btn-new-game">新游戏</button>
+        <button class="pixel-btn" id="btn-continue">继续游戏</button>
+        <button class="pixel-btn" id="btn-save">存档</button>
+      </div>
+
+      <div class="footer-hint">
+        <span class="blink">▼</span>
+        <span>按 新游戏 · 开始你的大学生活</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===================== 存档页 ===================== -->
+  <div id="page-save" class="page">
+    <div id="save-container">
+
+      <!-- 左上角返回按钮 -->
+      <button class="back-btn" id="btn-back-cover">← 返回</button>
+
+      <div class="save-title-area">
+        <h1 class="save-title" id="save-page-title">选择存档</h1>
+        <p class="save-subtitle" id="save-page-subtitle">点击空存档开始新游戏 · 点击已有存档查看</p>
+      </div>
+
+      <!-- 存档槽列表 -->
+      <div class="save-slots">
+        <div class="save-slot" data-slot="1">
+          <div class="slot-number">存档 1</div>
+          <div class="slot-content">
+            <div class="slot-empty">—— 空存档 ——</div>
+            <div class="slot-data" style="display:none;">
+              <div class="slot-icon">📘</div>
+              <div class="slot-info">
+                <div class="slot-day">第 <span class="slot-day-num">1</span> 天</div>
+                <div class="slot-time">—</div>
+                <div class="slot-stats">
+                  <span>学业 <b class="stat-study">0</b></span>
+                  <span>体力 <b class="stat-energy">100</b></span>
+                  <span>金钱 <b class="stat-money">1000</b></span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="slot-action">点击选择</div>
+        </div>
+
+        <div class="save-slot" data-slot="2">
+          <div class="slot-number">存档 2</div>
+          <div class="slot-content">
+            <div class="slot-empty">—— 空存档 ——</div>
+            <div class="slot-data" style="display:none;">
+              <div class="slot-icon">📘</div>
+              <div class="slot-info">
+                <div class="slot-day">第 <span class="slot-day-num">1</span> 天</div>
+                <div class="slot-time">—</div>
+                <div class="slot-stats">
+                  <span>学业 <b class="stat-study">0</b></span>
+                  <span>体力 <b class="stat-energy">100</b></span>
+                  <span>金钱 <b class="stat-money">1000</b></span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="slot-action">点击选择</div>
+        </div>
+
+        <div class="save-slot" data-slot="3">
+          <div class="slot-number">存档 3</div>
+          <div class="slot-content">
+            <div class="slot-empty">—— 空存档 ——</div>
+            <div class="slot-data" style="display:none;">
+              <div class="slot-icon">📘</div>
+              <div class="slot-info">
+                <div class="slot-day">第 <span class="slot-day-num">1</span> 天</div>
+                <div class="slot-time">—</div>
+                <div class="slot-stats">
+                  <span>学业 <b class="stat-study">0</b></span>
+                  <span>体力 <b class="stat-energy">100</b></span>
+                  <span>金钱 <b class="stat-money">1000</b></span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="slot-action">点击选择</div>
+        </div>
+      </div>
+
+      <div class="save-footer-hint">
+        <span class="blink">▼</span>
+        <span>共 3 个存档槽 · 数据保存在本浏览器</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===================== 游戏页 ===================== -->
+  <div id="page-game" class="page">
+    <div id="game-wrapper">
+
+      <!-- ===== 游戏场景 (Canvas) ===== -->
+      <div id="game-scene-wrap">
+        <canvas id="game-canvas" width="960" height="540"></canvas>
+
+        <!-- 顶部能量条 -->
+        <div id="status-bars">
+          <div class="stat-bar" id="bar-health">
+            <div class="bar-label">❤️ 健康</div>
+            <div class="bar-track">
+              <div class="bar-fill bar-health-fill" id="fill-health" style="width:100%"></div>
+            </div>
+            <div class="bar-num"><span id="val-health">100</span></div>
+          </div>
+          <div class="stat-bar" id="bar-program">
+            <div class="bar-label">💻 编程能力</div>
+            <div class="bar-track">
+              <div class="bar-fill bar-program-fill" id="fill-program" style="width:0%"></div>
+            </div>
+            <div class="bar-num"><span id="val-program">0</span></div>
+          </div>
+          <div class="stat-bar" id="bar-knowledge">
+            <div class="bar-label">📚 知识储备</div>
+            <div class="bar-track">
+              <div class="bar-fill bar-knowledge-fill" id="fill-knowledge" style="width:6%"></div>
+            </div>
+            <div class="bar-num"><span id="val-knowledge">30</span></div>
+          </div>
+        </div>
+
+        <!-- 右上角状态信息 -->
+        <div id="status-info">
+          <div class="info-item" id="info-semester">大一</div>
+          <div class="info-item" id="info-day">第 1 天</div>
+          <div class="info-item" id="info-money">💰 <span>1500</span></div>
+          <div class="info-item info-location" id="info-location">📍 寝室</div>
+        </div>
+
+        <!-- 左下角手机按钮 -->
+        <button id="btn-phone" class="phone-btn" onclick="document.getElementById('phone-overlay').classList.add('active')">
+          <span class="phone-icon">📱</span>
+        </button>
+
+        <!-- 右下角地图按钮 -->
+        <button id="btn-map" class="map-btn">🗺️ 地图</button>
+
+        <!-- ===== 手机界面（覆盖在游戏上） ===== -->
+        <div id="phone-overlay" class="sub-overlay">
+          <div id="phone-screen">
+            <div class="phone-header">
+              <div class="phone-time" id="phone-clock">12:00</div>
+              <button id="btn-phone-close" class="phone-close" onclick="document.getElementById('phone-overlay').classList.remove('active')">✕</button>
+            </div>
+            <div class="phone-apps">
+              <button class="phone-app" data-app="calendar" onclick="openApp('calendar')">
+                <div class="app-icon">📅</div>
+                <div class="app-name">日历</div>
+              </button>
+              <button class="phone-app" data-app="group" onclick="openApp('group')">
+                <div class="app-icon">👥</div>
+                <div class="app-name">科大小组手</div>
+              </button>
+              <button class="phone-app" data-app="shop" onclick="openApp('shop')">
+                <div class="app-icon">🛒</div>
+                <div class="app-name">购物</div>
+              </button>
+              <button class="phone-app" data-app="chat" onclick="openApp('chat')">
+                <div class="app-icon">💬</div>
+                <div class="app-name">聊天</div>
+              </button>
+              <button class="phone-app" data-app="call" onclick="openApp('call')">
+                <div class="app-icon">📞</div>
+                <div class="app-name">电话</div>
+              </button>
+              <button class="phone-app" data-app="settings" onclick="openApp('settings')">
+                <div class="app-icon">⚙️</div>
+                <div class="app-name">设置</div>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== 地图界面 ===== -->
+      <div id="map-overlay" class="sub-overlay">
+        <div id="map-panel">
+          <div class="map-header">
+            <div class="map-title">🏫 校园地图</div>
+            <button id="btn-map-close" class="map-close">✕</button>
+          </div>
+          <div class="map-places">
+            <button class="map-place" data-place="dorm">🏠 寝室</button>
+            <button class="map-place" data-place="canteen">🍜 食堂</button>
+            <button class="map-place" data-place="library">📖 图书馆</button>
+            <button class="map-place" data-place="teaching">🏛️ 教学楼</button>
+            <button class="map-place" data-place="gym">⚽ 体育馆</button>
+            <button class="map-place" data-place="mall">🏬 校园超市</button>
+            <button class="map-place" data-place="cafeteria">☕ 咖啡厅</button>
+            <button class="map-place" data-place="outdoor">🌳 操场</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== 手机内 App 子界面（通用弹层） ===== -->
+      <div id="app-overlay" class="sub-overlay">
+        <div id="app-panel">
+          <div class="app-header">
+            <div class="app-title" id="app-title-text">应用</div>
+            <button id="btn-app-close" class="app-close" onclick="document.getElementById('app-overlay').classList.remove('active')">✕</button>
+          </div>
+          <div class="app-content" id="app-content-area">
+            <!-- 动态填充 -->
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== 时间/行动控制栏 ===== -->
+    <div id="action-bar">
+      <button class="action-btn" id="btn-rest">😴 休息</button>
+      <button class="action-btn" id="btn-study">📖 学习</button>
+      <button class="action-btn" id="btn-code">💻 写代码</button>
+
+      <button class="action-btn" id="btn-next-time">⏭️ 下个时段</button>
+      <button class="action-btn action-btn-save" id="btn-game-save">💾 存档</button>
+  </div>
+
+  <!-- ===================== 覆盖确认弹窗 ===================== -->
+  <div id="modal-mask" class="modal-mask">
+    <div class="modal-box">
+      <div class="modal-title">提示</div>
+      <div class="modal-body" id="modal-body-text">该存档已有数据，是否覆盖此存档？</div>
+      <div class="modal-buttons">
+        <button class="pixel-btn modal-btn modal-btn-yes" id="modal-yes">是</button>
+        <button class="pixel-btn modal-btn modal-btn-no" id="modal-no">否</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="scene.js"></script>
+</body>
+</html>
