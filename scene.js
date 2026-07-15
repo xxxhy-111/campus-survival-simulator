@@ -9,7 +9,10 @@ let APP_CONTENTS = {};
 // 安全绑定事件的辅助函数
 function bindClick(id, callback) {
   const el = document.getElementById(id);
-  if (el) el.addEventListener('click', callback);
+  if (el) el.addEventListener('click', (e) => {
+    if (window.gameAudio) { gameAudio.init(); gameAudio.play('click'); }
+    callback(e);
+  });
 }
 
 document.addEventListener('DOMContentLoaded', function() {
@@ -773,6 +776,7 @@ document.addEventListener('DOMContentLoaded', function() {
   }
 
   function createNewSaveData() {
+    const schedule = generateSemesterSchedule(REQUIRED_COURSE_LOAD, [], 0);
     return {
       health: 100,
       program: 0,
@@ -783,9 +787,466 @@ document.addEventListener('DOMContentLoaded', function() {
       timeSlot: 0,    // 0=上午, 1=中午, 2=下午, 3=傍晚, 4=夜晚, 5=深夜
       lastStudyDay: 1,   // 上次学习是第几天
       lastCodeDay: 1,    // 上次写代码是第几天
+      lastSleepDay: 1,   // 上次睡觉是第几天
+      breakfastEaten: false,  // 今天是否吃了早餐
+      lunchEaten: false,      // 今天是否吃了午餐
+      dinnerEaten: false,     // 今天是否吃了晚餐
       events: [],
+      schedule: schedule,     // 当前学期课程表
+      scheduleSemester: getSemesterIndex(1), // 当前课程表所属学期
+      requiredCourseLoad: REQUIRED_COURSE_LOAD, // 固定必修课量，选修课会在此基础上增加
+      electives: [],          // 已选选修课列表
+      xiaoguFavor: 0,         // 小谷好感度（上限1000）
+      roommateFavors: { xin: 0, wang: 0, tang: 0 }, // 室友好感度（老信、老王、老唐）
+      bagPages: [             // 背包分页（3页，每页15格）
+        new Array(15).fill(null),
+        new Array(15).fill(null),
+        new Array(15).fill(null)
+      ],
+      bagPageIdx: 0,          // 当前查看的背包页
+      sceneItems: [],         // 当前场景中的可拾取物品
       createdAt: new Date().toISOString()
     };
+  }
+
+  const TRASH_ITEMS = [
+    { name: '塑料瓶', icon: '🥤', desc: '一个废弃的饮料瓶', value: 1 },
+    { name: '易拉罐', icon: '🥫', desc: '一个铝制易拉罐', value: 2 },
+    { name: '快递盒', icon: '📦', desc: '一个快递纸箱', value: 3 },
+    { name: '塑料袋', icon: '🛍️', desc: '一个购物塑料袋', value: 1 },
+    { name: '旧课本', icon: '📚', desc: '一本没人要的旧书', value: 5 },
+    { name: '空笔芯', icon: '🖊️', desc: '用完的笔芯', value: 1 },
+    { name: '外卖盒', icon: '🥡', desc: '吃剩的外卖盒', value: 2 },
+    { name: '废纸张', icon: '📄', desc: '废纸一张', value: 1 }
+  ];
+
+  function generateSceneItems(loc) {
+    if (!currentGameData) return;
+    currentGameData.sceneItems = [];
+    const bounds = getSceneBounds();
+    const itemCount = Math.floor(Math.random() * 4) + 2;
+
+    for (let i = 0; i < itemCount; i++) {
+      const itemType = TRASH_ITEMS[Math.floor(Math.random() * TRASH_ITEMS.length)];
+      let x, y;
+      let attempts = 0;
+      do {
+        x = bounds.minX + Math.random() * (bounds.maxX - bounds.minX - 40);
+        y = bounds.minY + Math.random() * (bounds.maxY - bounds.minY - 20);
+        attempts++;
+      } while (attempts < 100 && isTooCloseToPlayer(x, y, 50));
+
+      currentGameData.sceneItems.push({
+        id: `item_${Date.now()}_${i}`,
+        name: itemType.name,
+        icon: itemType.icon,
+        desc: itemType.desc,
+        x: x,
+        y: y
+      });
+    }
+  }
+
+  function isTooCloseToPlayer(x, y, dist) {
+    const dx = x - playerX;
+    const dy = y - playerY;
+    return Math.sqrt(dx * dx + dy * dy) < dist;
+  }
+
+  function drawSceneItems() {
+    if (!gctx || !currentGameData || !currentGameData.sceneItems) return;
+    currentGameData.sceneItems.forEach(item => {
+      gctx.font = '24px sans-serif';
+      gctx.textAlign = 'center';
+      gctx.textBaseline = 'middle';
+      gctx.fillText(item.icon, item.x + 10, item.y + 10);
+      gctx.font = '10px "ZCOOL KuaiLe", sans-serif';
+      gctx.fillStyle = '#3a1a05';
+      gctx.fillText(item.name, item.x + 10, item.y + 28);
+      gctx.fillStyle = '#fff';
+    });
+  }
+
+  // 向背包添加物品（item: { name, icon, desc, count }，同名同图标的物品可堆叠，每格最多16个）
+  function addItemToBag(item) {
+    if (!currentGameData) return false;
+    if (!currentGameData.bagPages) {
+      currentGameData.bagPages = [
+        new Array(15).fill(null),
+        new Array(15).fill(null),
+        new Array(15).fill(null)
+      ];
+    }
+    const maxPerCell = 16;
+    let remaining = item.count || 1;
+
+    // 1) 先在已有同种物品的格子上堆叠
+    for (let p = 0; p < currentGameData.bagPages.length && remaining > 0; p++) {
+      const page = currentGameData.bagPages[p];
+      for (let i = 0; i < page.length && remaining > 0; i++) {
+        const cell = page[i];
+        if (cell && cell.name === item.name && cell.icon === item.icon && cell.count < maxPerCell) {
+          const space = maxPerCell - cell.count;
+          const add = Math.min(space, remaining);
+          cell.count += add;
+          remaining -= add;
+        }
+      }
+    }
+
+    // 2) 剩余部分放入空格
+    for (let p = 0; p < currentGameData.bagPages.length && remaining > 0; p++) {
+      const page = currentGameData.bagPages[p];
+      for (let i = 0; i < page.length && remaining > 0; i++) {
+        if (!page[i]) {
+          const add = Math.min(maxPerCell, remaining);
+          page[i] = {
+            name: item.name,
+            icon: item.icon || '📦',
+            desc: item.desc || '',
+            count: add
+          };
+          remaining -= add;
+        }
+      }
+    }
+
+    return remaining === 0;
+  }
+
+  // 必修课程信息（含学分和能力加成）
+  const COURSE_INFO = {
+    '高等数学': { credits: 4, knowledge: 10, program: 0 },
+    '大学英语': { credits: 3, knowledge: 8, program: 0 },
+    'C语言程序设计': { credits: 3, knowledge: 5, program: 10 },
+    '计算机导论': { credits: 2, knowledge: 8, program: 0 },
+    '体育': { credits: 1, knowledge: 0, program: 0 },
+    '线性代数': { credits: 3, knowledge: 10, program: 0 },
+    '数据结构': { credits: 4, knowledge: 5, program: 12 },
+    '概率论': { credits: 3, knowledge: 10, program: 0 },
+    '操作系统': { credits: 4, knowledge: 8, program: 8 },
+    '数据库原理': { credits: 3, knowledge: 5, program: 10 },
+    '离散数学': { credits: 3, knowledge: 10, program: 0 },
+    '软件工程': { credits: 3, knowledge: 5, program: 10 }
+  };
+
+  // 选修课程列表
+  const ELECTIVE_COURSES = [
+    { name: 'Python程序设计', credits: 2, knowledge: 5, program: 10, desc: '学习Python编程基础', type: 'sch-prog', loc: '实验楼D' },
+    { name: '人工智能导论', credits: 3, knowledge: 8, program: 12, desc: 'AI入门课程', type: 'sch-comp', loc: '教3-402' },
+    { name: '计算机网络', credits: 3, knowledge: 8, program: 8, desc: '网络原理与协议', type: 'sch-comp', loc: '教2-408' },
+    { name: '编译原理', credits: 4, knowledge: 5, program: 12, desc: '编译器设计与实现', type: 'sch-prog', loc: '实验楼A' },
+    { name: '机器学习', credits: 3, knowledge: 8, program: 15, desc: 'ML算法与实践', type: 'sch-prog', loc: '实验楼B' },
+    { name: 'Web开发', credits: 2, knowledge: 3, program: 12, desc: '前后端开发技术', type: 'sch-prog', loc: '实验楼C' },
+    { name: '算法设计与分析', credits: 4, knowledge: 5, program: 15, desc: '高级算法课程', type: 'sch-math', loc: '教1-406' },
+    { name: '计算机图形学', credits: 3, knowledge: 5, program: 10, desc: '图形渲染原理', type: 'sch-comp', loc: '教3-305' },
+    { name: '信息安全', credits: 3, knowledge: 8, program: 8, desc: '网络安全基础', type: 'sch-comp', loc: '教2-506' },
+    { name: '移动应用开发', credits: 2, knowledge: 3, program: 12, desc: 'App开发实战', type: 'sch-prog', loc: '实验楼E' }
+  ];
+
+  const COURSES = [
+    { name: '高等数学', type: 'sch-math', loc: '教1-201' },
+    { name: '大学英语', type: 'sch-eng', loc: '教2-305' },
+    { name: 'C语言程序设计', type: 'sch-prog', loc: '实验楼A' },
+    { name: '计算机导论', type: 'sch-comp', loc: '教3-108' },
+    { name: '体育', type: 'sch-pe', loc: '操场' },
+    { name: '线性代数', type: 'sch-math', loc: '教1-302' },
+    { name: '数据结构', type: 'sch-prog', loc: '实验楼B' },
+    { name: '概率论', type: 'sch-math', loc: '教1-105' },
+    { name: '操作系统', type: 'sch-comp', loc: '教3-206' },
+    { name: '数据库原理', type: 'sch-comp', loc: '实验楼C' },
+    { name: '离散数学', type: 'sch-math', loc: '教1-101' },
+    { name: '软件工程', type: 'sch-prog', loc: '教3-102' },
+    { name: '思想道德与政治', type: 'sch-eng', loc: '教2-101' },
+    { name: '电路与电子学', type: 'sch-comp', loc: '实验楼D' },
+    { name: '大学物理', type: 'sch-math', loc: '教1-301' }
+  ];
+
+  const TIME_PERIODS = [
+    { name: '1-2节', time: '08:00-09:40', slot: 0 },
+    { name: '3-4节', time: '10:00-11:40', slot: 0 },
+    { name: '5-6节', time: '14:00-15:40', slot: 2 },
+    { name: '7-8节', time: '16:00-17:40', slot: 2 }
+  ];
+
+  const REQUIRED_COURSE_LOAD = 9;
+  const MAX_ELECTIVES = 3;
+  const SEMESTER_LENGTH_DAYS = 45;
+  const WEEK_SCHEDULE_DAYS = ['周一', '周二', '周三', '周四', '周五'];
+
+  function shuffleArray(arr) {
+    const copy = arr.slice();
+    for (let i = copy.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [copy[i], copy[j]] = [copy[j], copy[i]];
+    }
+    return copy;
+  }
+
+  function createEmptySchedule() {
+    const schedule = {};
+    WEEK_SCHEDULE_DAYS.forEach(day => {
+      schedule[day] = [];
+    });
+    return schedule;
+  }
+
+  function getSemesterIndex(day) {
+    return Math.floor((Math.max(1, day) - 1) / SEMESTER_LENGTH_DAYS);
+  }
+
+  function getSemesterLabel(semesterIndex) {
+    const yearNames = ['一', '二', '三', '四'];
+    const year = Math.floor(semesterIndex / 2) + 1;
+    const term = semesterIndex % 2 === 0 ? '上学期' : '下学期';
+    return `大${yearNames[Math.min(year, 4) - 1] || '四'}${term}`;
+  }
+
+  function countScheduleCourses(schedule) {
+    return WEEK_SCHEDULE_DAYS.reduce((sum, day) => {
+      const daySchedule = schedule && schedule[day] ? schedule[day] : [];
+      return sum + daySchedule.filter(Boolean).length;
+    }, 0);
+  }
+
+  function createScheduleCourse(course, periodIdx) {
+    const period = TIME_PERIODS[periodIdx];
+    return {
+      name: course.name,
+      type: course.type,
+      loc: course.loc,
+      periodName: period.name,
+      periodTime: period.time
+    };
+  }
+
+  function getElectiveByName(name) {
+    return ELECTIVE_COURSES.find(course => course.name === name) || null;
+  }
+
+  function collectScheduledCourseNames(schedule) {
+    const names = new Set();
+    WEEK_SCHEDULE_DAYS.forEach(day => {
+      const daySchedule = schedule && schedule[day] ? schedule[day] : [];
+      daySchedule.forEach(course => {
+        if (course && course.name) names.add(course.name);
+      });
+    });
+    return names;
+  }
+
+  function getAllScheduleSlots(schedule) {
+    const allSlots = {};
+    WEEK_SCHEDULE_DAYS.forEach(day => {
+      allSlots[day] = [];
+      TIME_PERIODS.forEach((period, idx) => {
+        allSlots[day].push({ day, periodIdx: idx });
+      });
+    });
+    return allSlots;
+  }
+
+  function pickBalancedSlots(schedule, count) {
+    const allSlots = getAllScheduleSlots(schedule);
+    const picked = [];
+    while (picked.length < count) {
+      const dayCounts = WEEK_SCHEDULE_DAYS.map(day => {
+        const daySchedule = schedule[day] || [];
+        return {
+          day,
+          count: daySchedule.filter(Boolean).length
+        };
+      }).sort((a, b) => {
+        if (a.count !== b.count) return a.count - b.count;
+        return Math.random() - 0.5;
+      });
+      const target = dayCounts.find(item => (schedule[item.day] || []).filter(Boolean).length < TIME_PERIODS.length);
+      if (!target) break;
+      const available = shuffleArray(allSlots[target.day]).filter(slot => !(schedule[slot.day] || [])[slot.periodIdx]);
+      if (!available.length) break;
+      const slot = available[0];
+      picked.push(slot);
+      schedule[slot.day][slot.periodIdx] = { _reserved: true };
+    }
+    picked.forEach(slot => {
+      delete schedule[slot.day][slot.periodIdx]._reserved;
+      schedule[slot.day][slot.periodIdx] = null;
+    });
+    return picked;
+  }
+
+  function generateSemesterSchedule(requiredCourseLoad = REQUIRED_COURSE_LOAD, electiveNames = [], semesterIndex = 0) {
+    const schedule = createEmptySchedule();
+    const requiredSlots = Math.max(0, Math.min(requiredCourseLoad, WEEK_SCHEDULE_DAYS.length * TIME_PERIODS.length));
+    const electiveSlots = Math.max(0, Math.min(electiveNames.length, WEEK_SCHEDULE_DAYS.length * TIME_PERIODS.length - requiredSlots));
+    const selectedSlots = pickBalancedSlots(schedule, requiredSlots + electiveSlots);
+
+    const freshmanCourses = [
+      { name: '大学英语', type: 'sch-eng', loc: '教2-305' },
+      { name: 'C语言程序设计', type: 'sch-prog', loc: '实验楼A' },
+      { name: '高等数学', type: 'sch-math', loc: '教1-201' },
+      { name: '体育', type: 'sch-pe', loc: '操场' },
+      { name: '思想道德与政治', type: 'sch-eng', loc: '教2-101' },
+      { name: '数据结构', type: 'sch-prog', loc: '实验楼B' },
+      { name: '电路与电子学', type: 'sch-comp', loc: '实验楼D' },
+      { name: '大学物理', type: 'sch-math', loc: '教1-301' },
+      { name: '离散数学', type: 'sch-math', loc: '教1-101' }
+    ];
+
+    const yearIndex = Math.floor(semesterIndex / 2);
+    const availableCourses = yearIndex === 0 ? freshmanCourses : COURSES;
+
+    const requiredCourses = shuffleArray(availableCourses);
+    const electives = shuffleArray(electiveNames.map(getElectiveByName).filter(Boolean));
+
+    selectedSlots.slice(0, requiredSlots).forEach((slot, idx) => {
+      const course = requiredCourses[idx % requiredCourses.length];
+      schedule[slot.day][slot.periodIdx] = createScheduleCourse(course, slot.periodIdx);
+    });
+
+    selectedSlots.slice(requiredSlots).forEach((slot, idx) => {
+      const course = electives[idx];
+      if (!course) return;
+      schedule[slot.day][slot.periodIdx] = createScheduleCourse(course, slot.periodIdx);
+    });
+
+    return schedule;
+  }
+
+  function addCourseToSchedule(schedule, course) {
+    const picked = pickBalancedSlots(schedule, 1);
+    if (!picked.length) return false;
+    const slot = picked[0];
+    schedule[slot.day][slot.periodIdx] = createScheduleCourse(course, slot.periodIdx);
+    return true;
+  }
+
+  function ensureScheduleState(data) {
+    if (!data) return;
+    if (!Array.isArray(data.electives)) data.electives = [];
+    data.electives = data.electives.filter((name, idx, arr) => getElectiveByName(name) && arr.indexOf(name) === idx).slice(0, MAX_ELECTIVES);
+    if (typeof data.requiredCourseLoad !== 'number' || Number.isNaN(data.requiredCourseLoad)) {
+      const currentLoad = countScheduleCourses(data.schedule);
+      data.requiredCourseLoad = Math.max(REQUIRED_COURSE_LOAD, currentLoad - data.electives.length);
+    }
+    if (typeof data.scheduleSemester !== 'number' || Number.isNaN(data.scheduleSemester)) {
+      data.scheduleSemester = getSemesterIndex(data.day || 1);
+    }
+    if (!data.schedule || typeof data.schedule !== 'object' || countScheduleCourses(data.schedule) === 0) {
+      data.schedule = generateSemesterSchedule(data.requiredCourseLoad, data.electives, data.scheduleSemester);
+      return;
+    }
+
+    const scheduledNames = collectScheduledCourseNames(data.schedule);
+    data.electives.forEach(name => {
+      if (scheduledNames.has(name)) return;
+      const course = getElectiveByName(name);
+      if (course && addCourseToSchedule(data.schedule, course)) {
+        scheduledNames.add(name);
+      }
+    });
+  }
+
+  function trySelectElectiveCourse(courseName) {
+    if (!currentGameData) return { ok: false, message: '当前没有可用存档。' };
+    if (!currentGameData.electives) currentGameData.electives = [];
+    if (currentGameData.electives.includes(courseName)) {
+      return { ok: false, message: `《${courseName}》已经选过了。` };
+    }
+    if (currentGameData.electives.length >= MAX_ELECTIVES) {
+      return { ok: false, message: `本学期选修课已选满 ${MAX_ELECTIVES} 节。` };
+    }
+    const course = getElectiveByName(courseName);
+    if (!course) {
+      return { ok: false, message: '未找到这门选修课。' };
+    }
+    if (!currentGameData.schedule) {
+      currentGameData.schedule = generateSemesterSchedule(currentGameData.requiredCourseLoad || REQUIRED_COURSE_LOAD, currentGameData.electives || [], currentGameData.scheduleSemester || 0);
+    }
+    const inserted = addCourseToSchedule(currentGameData.schedule, course);
+    if (!inserted) {
+      return { ok: false, message: '课程表已经排满，暂时无法继续选课。' };
+    }
+    currentGameData.electives.push(courseName);
+    return {
+      ok: true,
+      message: `✅ 已选择选修课：${courseName}\n当前课程量 +1，已选 ${currentGameData.electives.length}/${MAX_ELECTIVES} 节`
+    };
+  }
+
+  function generateRandomSchedule() {
+    const schedule = createEmptySchedule();
+    const selected = [];
+    const allSlots = getAllScheduleSlots(schedule);
+    const dailyCounts = { '周一': 0, '周二': 0, '周三': 0, '周四': 0, '周五': 0 };
+    const wednesdaySlots = allSlots['周三'].sort(() => Math.random() - 0.5);
+    for (let i = 0; i < 3 && i < wednesdaySlots.length; i++) {
+      selected.push(wednesdaySlots[i]);
+      dailyCounts['周三']++;
+    }
+    const otherDays = ['周一', '周二', '周四', '周五'].sort(() => Math.random() - 0.5);
+    const twoCourseDays = otherDays.slice(0, 2);
+    const oneCourseDays = otherDays.slice(2, 4);
+    twoCourseDays.forEach(day => {
+      const slots = allSlots[day].sort(() => Math.random() - 0.5);
+      for (let i = 0; i < 2 && i < slots.length; i++) {
+        selected.push(slots[i]);
+        dailyCounts[day]++;
+      }
+    });
+    oneCourseDays.forEach(day => {
+      const slots = allSlots[day].sort(() => Math.random() - 0.5);
+      if (slots.length > 0) {
+        selected.push(slots[0]);
+        dailyCounts[day]++;
+      }
+    });
+    const courseIndices = [];
+    for (let i = 0; i < selected.length; i++) {
+      courseIndices.push(Math.floor(Math.random() * COURSES.length));
+    }
+    selected.forEach((slot, i) => {
+      const courseIdx = courseIndices[i];
+      const course = COURSES[courseIdx];
+      const period = TIME_PERIODS[slot.periodIdx];
+      schedule[slot.day][slot.periodIdx] = {
+        name: course.name,
+        type: course.type,
+        loc: course.loc,
+        periodName: period.name,
+        periodTime: period.time
+      };
+    });
+    return schedule;
+  }
+
+  function renderScheduleTable() {
+    if (!currentGameData) return '';
+    const schedule = currentGameData.schedule || {};
+    let html = `
+      <div class="schedule-header">
+        <div class="sch-cell sch-time">时间</div>
+        <div class="sch-cell">周一</div>
+        <div class="sch-cell">周二</div>
+        <div class="sch-cell">周三</div>
+        <div class="sch-cell">周四</div>
+        <div class="sch-cell">周五</div>
+      </div>`;
+    TIME_PERIODS.forEach((period, pIdx) => {
+      html += `<div class="schedule-row">
+        <div class="sch-cell sch-time">${period.name}<br><span class="sch-small">${period.time}</span></div>`;
+      ['周一', '周二', '周三', '周四', '周五'].forEach(day => {
+        const daySchedule = schedule[day] || [];
+        const course = daySchedule[pIdx];
+        if (course) {
+          html += `<div class="sch-cell sch-course ${course.type}">${course.name}<br><span class="sch-small">${course.loc}</span></div>`;
+        } else {
+          html += `<div class="sch-cell"></div>`;
+        }
+      });
+      html += `</div>`;
+    });
+    return html;
   }
 
   /* ==========================================================
@@ -794,7 +1255,8 @@ document.addEventListener('DOMContentLoaded', function() {
   const pages = {
     cover: document.getElementById('page-cover'),
     save: document.getElementById('page-save'),
-    game: document.getElementById('page-game')
+    game: document.getElementById('page-game'),
+    fail: document.getElementById('page-fail')
   };
   function showPage(name) {
     Object.values(pages).forEach(p => { if (p) p.classList.remove('active'); });
@@ -803,6 +1265,8 @@ document.addEventListener('DOMContentLoaded', function() {
       startGameLoop();
     } else {
       stopGameLoop();
+      // 离开游戏页时停止背景音乐
+      if (window.gameAudio) gameAudio.stopBgm();
     }
   }
 
@@ -872,8 +1336,18 @@ document.addEventListener('DOMContentLoaded', function() {
   let playerY = 540 - 30 - 90;  // 主角当前脚的 y 坐标
   let targetX = 130;        // 目标 x
   let targetY = 540 - 30 - 90;  // 目标 y
+  let currentPath = [];     // 当前寻路路径点数组
   let playerFacing = 1;     // 1=朝右, -1=朝左
   let playerStepFrame = 0;  // 走路动画帧计数器
+  let showXiaoguMenu = false; // 小谷交互菜单显示状态
+  let showRoommateMenu = null; // 室友交互菜单（null/'xin'/'wang'/'tang'）
+
+  // 室友数据：位置、衣服颜色、名称
+  const ROOMMATES = [
+    { key: 'xin', name: '老信', cx: 365, feetY: 150, color: '#4a8ac8' },
+    { key: 'wang', name: '老王', cx: 365, feetY: 430, color: '#e86a4a' },
+    { key: 'tang', name: '老唐', cx: 65, feetY: 150, color: '#e8a04a' }
+  ];
 
   const LOCATIONS = {
     dorm: '寝室',
@@ -946,10 +1420,168 @@ document.addEventListener('DOMContentLoaded', function() {
   const gctx = gameCanvas ? gameCanvas.getContext('2d') : null;
   if (gctx) gctx.imageSmoothingEnabled = false;
 
-  // 地点对应的 Canvas 场景渲染函数
-  const SCENE_FNS = {
-    dorm: renderDormScene,
-  };
+  // 获取当前场景的移动范围和障碍物
+  function getSceneBounds() {
+    const loc = currentGameData ? currentGameData.location : 'dorm';
+    if (loc === 'teaching') {
+      return {
+        minX: 30, maxX: 930,
+        minY: 400, maxY: 505,
+        obstacles: [
+          { x: 155, y: 440, w: 55, h: 55 }
+        ]
+      };
+    }
+    if (loc === 'outdoor') {
+      return {
+        minX: 30, maxX: 930,
+        minY: 430, maxY: 480,
+        obstacles: []
+      };
+    }
+    return {
+      minX: 30, maxX: 930,
+      minY: 150, maxY: 505,
+      obstacles: [
+        { x: 720, y: 370, w: 240, h: 140 },
+        { x: 735, y: 245, w: 220, h: 55 }
+      ]
+    };
+  }
+
+  function getSceneStartPos(loc) {
+    if (loc === 'teaching') {
+      return { x: 900, y: 450 };
+    }
+    if (loc === 'outdoor') {
+      return { x: 480, y: 455 };
+    }
+    return { x: 130, y: GAME_H - 30 - 90 };
+  }
+
+  // 检查点是否在障碍物内
+  function isInObstacle(x, y, obstacles) {
+    for (const obs of obstacles) {
+      if (x >= obs.x && x <= obs.x + obs.w && y >= obs.y && y <= obs.y + obs.h) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // 寻路：简单几何绕行算法
+  function findPath(startX, startY, targetX, targetY, bounds) {
+    const path = [{ x: startX, y: startY }];
+
+    // 检查直线是否被障碍物阻挡
+    let blocked = false;
+    let blockingObs = null;
+
+    for (const obs of bounds.obstacles) {
+      if (lineIntersectsRect(startX, startY, targetX, targetY, obs)) {
+        blocked = true;
+        blockingObs = obs;
+        break;
+      }
+    }
+
+    if (!blocked) {
+      path.push({ x: targetX, y: targetY });
+      return path;
+    }
+
+    // 计算绕行路径
+    const obsTop = blockingObs.y - 5;
+    const obsBottom = blockingObs.y + blockingObs.h + 5;
+    const obsLeft = blockingObs.x - 5;
+    const obsRight = blockingObs.x + blockingObs.w + 5;
+
+    const topClear = obsTop >= bounds.minY + 10;
+    const bottomClear = obsBottom <= bounds.maxY - 10;
+
+    let bypassY;
+    if (topClear) {
+      bypassY = obsTop;
+    } else if (bottomClear) {
+      bypassY = obsBottom;
+    } else {
+      bypassY = Math.max(bounds.minY + 10, (bounds.minY + blockingObs.y) / 2);
+    }
+
+    bypassY = Math.max(bounds.minY + 5, Math.min(bounds.maxY - 5, bypassY));
+
+    const startLeft = startX < blockingObs.x;
+    const targetLeft = targetX < blockingObs.x;
+
+    if (startLeft === targetLeft) {
+      path.push({ x: targetX, y: targetY });
+      return path;
+    }
+
+    if (startLeft) {
+      path.push({ x: obsLeft, y: bypassY });
+      path.push({ x: obsRight, y: bypassY });
+    } else {
+      path.push({ x: obsRight, y: bypassY });
+      path.push({ x: obsLeft, y: bypassY });
+    }
+
+    path.push({ x: targetX, y: targetY });
+    return path;
+  }
+
+  function lineIntersectsRect(x1, y1, x2, y2, rect) {
+    const steps = 50;
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps;
+      const px = x1 + (x2 - x1) * t;
+      const py = y1 + (y2 - y1) * t;
+      if (px >= rect.x && px <= rect.x + rect.w &&
+          py >= rect.y && py <= rect.y + rect.h) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function findNearestWalkable(startCol, startRow, bounds, gridSize) {
+    const queue = [{ col: startCol, row: startRow }];
+    const visited = new Set();
+    visited.add(`${startCol},${startRow}`);
+
+    const dirs = [
+      { dx: 0, dy: -1 }, { dx: 0, dy: 1 },
+      { dx: -1, dy: 0 }, { dx: 1, dy: 0 },
+      { dx: -1, dy: -1 }, { dx: -1, dy: 1 },
+      { dx: 1, dy: -1 }, { dx: 1, dy: 1 }
+    ];
+
+    while (queue.length > 0) {
+      const current = queue.shift();
+
+      for (const dir of dirs) {
+        const col = current.col + dir.dx;
+        const row = current.row + dir.dy;
+        const key = `${col},${row}`;
+
+        if (visited.has(key)) continue;
+        visited.add(key);
+
+        const nx = col * gridSize + gridSize / 2;
+        const ny = row * gridSize + gridSize / 2;
+
+        if (nx < bounds.minX || nx > bounds.maxX) continue;
+        if (ny < bounds.minY || ny > bounds.maxY) continue;
+        if (!isInObstacle(nx, ny, bounds.obstacles)) {
+          return { col, row };
+        }
+
+        queue.push({ col, row });
+      }
+    }
+
+    return null;
+  }
 
   // 鼠标点击：主角移动到点击位置
   if (gameCanvas) {
@@ -960,31 +1592,148 @@ document.addEventListener('DOMContentLoaded', function() {
       const clickX = (e.clientX - rect.left) * scaleX;
       const clickY = (e.clientY - rect.top) * scaleY;
 
-      // 可活动范围：左边寝室 + 右边阳台（排除卫生间和晾衣区）
-      const minY = 150;
-      const maxY = 505;
-      const minX = 30;
-      const maxX = 930;
+      const bounds = getSceneBounds();
+      if (window.gameAudio) gameAudio.init();
 
-      // 卫生间区域 (bathX=720, bathY=370, bathW=240, bathH=140)
-      const bathX = 720;
-      const bathY = 370;
-      const bathW = 240;
-      const bathH = 140;
-      const inBathroom = clickX >= bathX && clickX <= bathX + bathW &&
-                         clickY >= bathY && clickY <= bathY + bathH;
+      // 教学楼场景：检测点击102教室门
+      const loc = currentGameData ? currentGameData.location : 'dorm';
+      if (loc === 'teaching') {
+        // 小谷菜单显示时，检测菜单点击
+        if (showXiaoguMenu) {
+          const menuX = 220;
+          const menuY = 410;
+          const menuW = 90;
+          const menuH = 24;
+          // 对话按钮
+          if (clickX >= menuX && clickX <= menuX + menuW &&
+              clickY >= menuY && clickY <= menuY + menuH) {
+            showXiaoguMenu = false;
+            if (window.gameAudio) gameAudio.play('click');
+            talkToXiaogu();
+            return;
+          }
+          // 送礼按钮
+          if (clickX >= menuX && clickX <= menuX + menuW &&
+              clickY >= menuY + 28 && clickY <= menuY + 28 + menuH) {
+            if (window.gameAudio) gameAudio.play('click');
+            return;
+          }
+          // 返回按钮
+          if (clickX >= menuX && clickX <= menuX + menuW &&
+              clickY >= menuY + 56 && clickY <= menuY + 56 + menuH) {
+            showXiaoguMenu = false;
+            if (window.gameAudio) gameAudio.play('close');
+            return;
+          }
+          // 点击菜单外关闭
+          showXiaoguMenu = false;
+        }
+        // 小谷点击区域：x=155-210, y=430-495
+        if (clickX >= 150 && clickX <= 215 && clickY >= 425 && clickY <= 495) {
+          showXiaoguMenu = true;
+          if (window.gameAudio) gameAudio.play('click');
+          return;
+        }
+        // 102教室门区域：x=500, y=280
+        if (clickX >= 495 && clickX <= 555 && clickY >= 255 && clickY <= 390) {
+          if (window.gameAudio) gameAudio.play('click');
+          attendClass();
+          return;
+        }
+      }
 
-      // 晾衣杆+衣服区域 (x735-955, y245-300)
-      const clothesX = 735;
-      const clothesY = 245;
-      const clothesW = 220;
-      const clothesH = 55;
-      const inClothes = clickX >= clothesX && clickX <= clothesX + clothesW &&
-                       clickY >= clothesY && clickY <= clothesY + clothesH;
+      // 寝室场景：室友交互
+      if (loc === 'dorm') {
+        // 室友菜单显示时，检测菜单点击
+        if (showRoommateMenu) {
+          const rm = ROOMMATES.find(r => r.key === showRoommateMenu);
+          if (rm) {
+            const menuW = 90;
+            const menuH = 24;
+            const gap = 4;
+            let menuX = rm.cx + 30;
+            if (menuX + menuW > 920) menuX = rm.cx - 30 - menuW;
+            let menuY = rm.feetY - 60;
+            if (menuY < 30) menuY = rm.feetY + 10;
 
-      if (!inBathroom && !inClothes) {
-        targetX = Math.max(minX, Math.min(maxX, clickX));
-        targetY = Math.max(minY, Math.min(maxY, clickY));
+            // 对话按钮
+            if (clickX >= menuX && clickX <= menuX + menuW &&
+                clickY >= menuY && clickY <= menuY + menuH) {
+              const key = showRoommateMenu;
+              showRoommateMenu = null;
+              if (window.gameAudio) gameAudio.play('click');
+              talkToRoommate(key);
+              return;
+            }
+            // 送礼按钮
+            if (clickX >= menuX && clickX <= menuX + menuW &&
+                clickY >= menuY + menuH + gap && clickY <= menuY + menuH + gap + menuH) {
+              if (window.gameAudio) gameAudio.play('click');
+              return;
+            }
+            // 返回按钮
+            if (clickX >= menuX && clickX <= menuX + menuW &&
+                clickY >= menuY + (menuH + gap) * 2 && clickY <= menuY + (menuH + gap) * 2 + menuH) {
+              showRoommateMenu = null;
+              if (window.gameAudio) gameAudio.play('close');
+              return;
+            }
+          }
+          // 点击菜单外关闭
+          showRoommateMenu = null;
+        }
+        // 检测点击室友
+        for (const rm of ROOMMATES) {
+          if (clickX >= rm.cx - 25 && clickX <= rm.cx + 25 &&
+              clickY >= rm.feetY - 85 && clickY <= rm.feetY + 5) {
+            showRoommateMenu = rm.key;
+            if (window.gameAudio) gameAudio.play('click');
+            return;
+          }
+        }
+      }
+
+      // === 场景物品拾取 ===
+      if (currentGameData && currentGameData.sceneItems) {
+        for (let i = currentGameData.sceneItems.length - 1; i >= 0; i--) {
+          const item = currentGameData.sceneItems[i];
+          const dx = clickX - (item.x + 10);
+          const dy = clickY - (item.y + 10);
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          if (dist < 25) {
+            addItemToBag({ name: item.name, icon: item.icon, desc: item.desc, count: 1 });
+            currentGameData.sceneItems.splice(i, 1);
+            if (window.gameAudio) gameAudio.play('pickup');
+            openSimpleNotice(`🎒 获得物品：${item.name}\n${item.desc}`);
+            return;
+          }
+        }
+      }
+
+      let finalTargetX = Math.max(bounds.minX, Math.min(bounds.maxX, clickX));
+      let finalTargetY = Math.max(bounds.minY, Math.min(bounds.maxY, clickY));
+
+      if (isInObstacle(finalTargetX, finalTargetY, bounds.obstacles)) {
+        const obs = bounds.obstacles[0];
+        const distLeft = Math.abs(finalTargetX - obs.x);
+        const distRight = Math.abs(finalTargetX - (obs.x + obs.w));
+        if (distLeft < distRight) {
+          finalTargetX = obs.x - 10;
+        } else {
+          finalTargetX = obs.x + obs.w + 10;
+        }
+        finalTargetX = Math.max(bounds.minX, Math.min(bounds.maxX, finalTargetX));
+      }
+
+      const path = findPath(playerX, playerY, finalTargetX, finalTargetY, bounds);
+      if (path && path.length > 1) {
+        currentPath = path;
+        targetX = finalTargetX;
+        targetY = finalTargetY;
+      } else {
+        targetX = finalTargetX;
+        targetY = finalTargetY;
+        currentPath = [];
       }
     });
   }
@@ -992,49 +1741,89 @@ document.addEventListener('DOMContentLoaded', function() {
   function startGameLoop() {
     if (gameLoopId) return;
     updateGameUI();
-    // 每次进入游戏，重置主角到默认位置
     playerX = 130;
     playerY = GAME_H - 30 - 90;
     targetX = playerX;
     targetY = playerY;
+    let stuckFrames = 0;
+    let lastPlayerX = playerX;
+    let lastPlayerY = playerY;
     function loop() {
-      // 障碍物区域碰撞检测（卫生间 + 晾衣杆）
-      const bathX = 720, bathY = 370, bathW = 240, bathH = 140;
-      const clothesX = 735, clothesY = 245, clothesW = 220, clothesH = 55;
+      const bounds = getSceneBounds();
 
-      // === 更新主角位置 ===
-      const dx = targetX - playerX;
-      const dy = targetY - playerY;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      const speed = 2.5;  // 每帧移动像素
+      const speed = 2.5;
+      let dx = 0, dy = 0, dist = 0;
 
-      if (dist > speed) {
-        // 逐帧靠近目标点（先试新位置，如果进入障碍物区域则不移动）
-        const nextX = playerX + (dx / dist) * speed;
-        const nextY = playerY + (dy / dist) * speed;
-        const inBathroom = nextX >= bathX && nextX <= bathX + bathW &&
-                           nextY >= bathY && nextY <= bathY + bathH;
-        const inClothes = nextX >= clothesX && nextX <= clothesX + clothesW &&
-                         nextY >= clothesY && nextY <= clothesY + clothesH;
-        if (!inBathroom && !inClothes) {
-          playerX = nextX;
-          playerY = nextY;
+      if (currentPath.length > 0) {
+        const waypoint = currentPath[0];
+        dx = waypoint.x - playerX;
+        dy = waypoint.y - playerY;
+        dist = Math.sqrt(dx * dx + dy * dy);
+
+        if (dist <= speed) {
+          playerX = waypoint.x;
+          playerY = waypoint.y;
+          currentPath.shift();
+          if (currentPath.length === 0) {
+            playerStepFrame = 0;
+          }
         } else {
-          // 碰到卫生间边界，停止
-          targetX = playerX;
-          targetY = playerY;
+          playerX += (dx / dist) * speed;
+          playerY += (dy / dist) * speed;
+          playerStepFrame = (playerStepFrame + 1) % 60;
         }
-        // 更新朝向
-        if (Math.abs(dx) > 0.5) {
-          playerFacing = dx > 0 ? 1 : -1;
-        }
-        // 走路动画帧推进
-        playerStepFrame = (playerStepFrame + 1) % 60;
       } else {
-        // 到达目标
-        playerX = targetX;
-        playerY = targetY;
-        playerStepFrame = 0;
+        dx = targetX - playerX;
+        dy = targetY - playerY;
+        dist = Math.sqrt(dx * dx + dy * dy);
+
+        if (dist > speed) {
+          const nextX = playerX + (dx / dist) * speed;
+          const nextY = playerY + (dy / dist) * speed;
+          const inObstacle = isInObstacle(nextX, nextY, bounds.obstacles);
+          const outOfBounds = nextX < bounds.minX || nextX > bounds.maxX ||
+                             nextY < bounds.minY || nextY > bounds.maxY;
+          if (!inObstacle && !outOfBounds) {
+            playerX = nextX;
+            playerY = nextY;
+            playerStepFrame = (playerStepFrame + 1) % 60;
+          } else {
+            const path = findPath(playerX, playerY, targetX, targetY, bounds);
+            if (path && path.length > 1) {
+              currentPath = path;
+            } else {
+              targetX = playerX;
+              targetY = playerY;
+            }
+          }
+        } else {
+          playerX = targetX;
+          playerY = targetY;
+          playerStepFrame = 0;
+        }
+      }
+
+      if (Math.abs(playerX - lastPlayerX) < 0.5 && Math.abs(playerY - lastPlayerY) < 0.5) {
+        stuckFrames++;
+        if (stuckFrames > 20 && (currentPath.length > 0 || dist > speed)) {
+          stuckFrames = 0;
+          currentPath = [];
+          const path = findPath(playerX, playerY, targetX, targetY, bounds);
+          if (path && path.length > 1) {
+            currentPath = path;
+          } else {
+            targetX = playerX;
+            targetY = playerY;
+          }
+        }
+      } else {
+        stuckFrames = 0;
+      }
+      lastPlayerX = playerX;
+      lastPlayerY = playerY;
+
+      if (Math.abs(dx) > 0.5) {
+        playerFacing = dx > 0 ? 1 : -1;
       }
 
       // === 渲染场景 ===
@@ -1049,6 +1838,371 @@ document.addEventListener('DOMContentLoaded', function() {
       cancelAnimationFrame(gameLoopId);
       gameLoopId = null;
     }
+  }
+
+  /* ==========================================================
+     教学楼场景 Canvas 渲染
+     ========================================================== */
+  function drawVendingMachine(x, y) {
+    // 自动售货机主体
+    gctx.fillStyle = '#c0c0c8';
+    gctx.fillRect(x, y, 80, 140);
+    // 顶部面板
+    gctx.fillStyle = '#a0a0a8';
+    gctx.fillRect(x, y, 80, 20);
+    // 显示屏
+    gctx.fillStyle = '#2a3a4a';
+    gctx.fillRect(x + 8, y + 5, 40, 12);
+    gctx.fillStyle = '#4ae88a';
+    gctx.fillRect(x + 10, y + 7, 36, 8);
+    // 玻璃橱窗
+    gctx.fillStyle = 'rgba(100,150,200,0.3)';
+    gctx.fillRect(x + 6, y + 25, 68, 75);
+    // 橱窗边框
+    gctx.fillStyle = '#808088';
+    gctx.fillRect(x + 4, y + 23, 72, 2);
+    gctx.fillRect(x + 4, y + 98, 72, 2);
+    gctx.fillRect(x + 4, y + 23, 2, 77);
+    gctx.fillRect(x + 74, y + 23, 2, 77);
+    // 饮料瓶（不同颜色）
+    const drinkColors = ['#e84a4a', '#4a8ae8', '#4ae88a', '#e8e84a', '#e84ae8'];
+    for (let i = 0; i < 5; i++) {
+      const dx = x + 10 + i * 13;
+      const dy = y + 30;
+      gctx.fillStyle = drinkColors[i];
+      gctx.fillRect(dx, dy, 10, 25);
+      gctx.fillStyle = '#ffffff';
+      gctx.fillRect(dx + 2, dy + 5, 6, 3);
+    }
+    for (let i = 0; i < 5; i++) {
+      const dx = x + 10 + i * 13;
+      const dy = y + 60;
+      gctx.fillStyle = drinkColors[(i + 2) % 5];
+      gctx.fillRect(dx, dy, 10, 25);
+      gctx.fillStyle = '#ffffff';
+      gctx.fillRect(dx + 2, dy + 5, 6, 3);
+    }
+    // 取货口
+    gctx.fillStyle = '#3a3a40';
+    gctx.fillRect(x + 10, y + 108, 45, 20);
+    gctx.fillStyle = '#2a2a30';
+    gctx.fillRect(x + 12, y + 110, 41, 16);
+    // 投币口和按钮
+    gctx.fillStyle = '#e8c040';
+    gctx.fillRect(x + 60, y + 110, 14, 10);
+    gctx.fillStyle = '#a08020';
+    gctx.fillRect(x + 62, y + 113, 10, 4);
+    // 按钮面板
+    gctx.fillStyle = '#5a5a60';
+    gctx.fillRect(x + 58, y + 30, 18, 70);
+    for (let i = 0; i < 6; i++) {
+      gctx.fillStyle = i < 3 ? '#e84a4a' : '#4ae88a';
+      gctx.fillRect(x + 61, y + 33 + i * 11, 12, 8);
+    }
+  }
+
+  function drawClassroomDoor(x, y, label) {
+    // 教室门
+    gctx.fillStyle = '#6a4a2a';
+    gctx.fillRect(x - 5, y - 5, 60, 10);
+    gctx.fillRect(x - 5, y - 5, 8, 110);
+    gctx.fillRect(x + 47, y - 5, 8, 110);
+    // 门板
+    gctx.fillStyle = '#8b6914';
+    gctx.fillRect(x, y, 50, 100);
+    // 门上玻璃窗
+    gctx.fillStyle = 'rgba(160,200,240,0.6)';
+    gctx.fillRect(x + 5, y + 10, 40, 30);
+    gctx.fillStyle = '#6a4a2a';
+    gctx.fillRect(x + 23, y + 10, 4, 30);
+    // 门把手
+    gctx.fillStyle = '#d4a017';
+    gctx.fillRect(x + 38, y + 55, 6, 8);
+    // 门牌
+    gctx.fillStyle = '#f0e0c0';
+    gctx.fillRect(x + 8, y - 22, 34, 14);
+    gctx.fillStyle = '#3a2a1a';
+    gctx.font = 'bold 10px "ZCOOL KuaiLe",sans-serif';
+    gctx.textAlign = 'center';
+    gctx.fillText(label, x + 25, y - 12);
+  }
+
+  function drawXiaogu(cx, feetY) {
+    // === 地面阴影 ===
+    gctx.fillStyle = 'rgba(40,20,10,0.35)';
+    gctx.fillRect(cx - 18, feetY, 36, 5);
+
+    // === 腿（白色过膝长袜 + 粉色鞋子）===
+    // 粉色鞋子
+    gctx.fillStyle = '#d8a8b0';
+    gctx.fillRect(cx - 13, feetY - 4, 12, 4);
+    gctx.fillRect(cx + 1, feetY - 4, 12, 4);
+    // 白色长袜（高22，和小白腿一样）
+    gctx.fillStyle = '#fff5f0';
+    gctx.fillRect(cx - 12, feetY - 22, 10, 18);
+    gctx.fillRect(cx + 2, feetY - 22, 10, 18);
+    // 袜口粉色边
+    gctx.fillStyle = '#e8c0c8';
+    gctx.fillRect(cx - 13, feetY - 24, 12, 2);
+    gctx.fillRect(cx + 1, feetY - 24, 12, 2);
+
+    // === 粉色连衣裙 ===
+    // 裙子部分（高10，覆盖腿上部）
+    gctx.fillStyle = '#e8b8c0';
+    gctx.fillRect(cx - 15, feetY - 32, 30, 10);
+    // 上身（高16，和小白身体上半对齐：feetY-48到feetY-32 = 16）
+    gctx.fillStyle = '#e0b0b8';
+    gctx.fillRect(cx - 14, feetY - 48, 28, 16);
+    // 领口
+    gctx.fillStyle = '#fff0e8';
+    gctx.fillRect(cx - 6, feetY - 50, 12, 6);
+
+    // === 蓬松横条纹短袖（位置对齐小白手臂）===
+    // 左袖
+    for (let i = 0; i < 4; i++) {
+      gctx.fillStyle = i % 2 === 0 ? '#e8b8c0' : '#f0d0d8';
+      gctx.fillRect(cx - 22, feetY - 46 + i * 4, 10, 4);
+    }
+    // 右袖
+    for (let i = 0; i < 4; i++) {
+      gctx.fillStyle = i % 2 === 0 ? '#e8b8c0' : '#f0d0d8';
+      gctx.fillRect(cx + 12, feetY - 46 + i * 4, 10, 4);
+    }
+    // 手（对齐小白手的位置：feetY-30到feetY-18 = 12高，宽8）
+    gctx.fillStyle = '#f5ddd0';
+    gctx.fillRect(cx - 22, feetY - 30, 10, 8);
+    gctx.fillRect(cx + 12, feetY - 30, 10, 8);
+
+    // === 头部（和小白一样：宽28，高26，cx-14，feetY-74）
+    gctx.fillStyle = '#c89898';
+    gctx.fillRect(cx - 14, feetY - 74, 28, 26);
+
+    // === 脸部（和小白一样：宽24，高20，cx-12，feetY-68）
+    gctx.fillStyle = '#fff0e8';
+    gctx.fillRect(cx - 12, feetY - 68, 24, 20);
+
+    // 刘海
+    gctx.fillStyle = '#c89898';
+    gctx.fillRect(cx - 12, feetY - 68, 24, 6);
+    // 头发两侧
+    gctx.fillRect(cx - 14, feetY - 66, 4, 18);
+    gctx.fillRect(cx + 10, feetY - 66, 4, 18);
+
+    // 白色猫耳
+    gctx.fillStyle = '#fff5f0';
+    gctx.beginPath();
+    gctx.moveTo(cx - 12, feetY - 76);
+    gctx.lineTo(cx - 8, feetY - 86);
+    gctx.lineTo(cx - 4, feetY - 76);
+    gctx.fill();
+    gctx.beginPath();
+    gctx.moveTo(cx + 4, feetY - 76);
+    gctx.lineTo(cx + 8, feetY - 86);
+    gctx.lineTo(cx + 12, feetY - 76);
+    gctx.fill();
+    // 猫耳内部粉色
+    gctx.fillStyle = '#e8b8c0';
+    gctx.beginPath();
+    gctx.moveTo(cx - 12, feetY - 76);
+    gctx.lineTo(cx - 8, feetY - 82);
+    gctx.lineTo(cx - 4, feetY - 76);
+    gctx.fill();
+    gctx.beginPath();
+    gctx.moveTo(cx + 4, feetY - 76);
+    gctx.lineTo(cx + 8, feetY - 82);
+    gctx.lineTo(cx + 12, feetY - 76);
+    gctx.fill();
+
+    // === 眼睛（对齐小白眼睛位置：feetY-62，宽5高5）
+    gctx.fillStyle = '#b88888';
+    gctx.fillRect(cx - 8, feetY - 62, 5, 5);
+    gctx.fillRect(cx + 3, feetY - 62, 5, 5);
+    // 眼睛高光
+    gctx.fillStyle = '#ffffff';
+    gctx.fillRect(cx - 7, feetY - 61, 2, 2);
+    gctx.fillRect(cx + 4, feetY - 61, 2, 2);
+
+    // === 头顶好感度显示（点击小谷后显示）===
+    if (showXiaoguMenu && currentGameData) {
+      const favor = currentGameData.xiaoguFavor || 0;
+      const label = `💕 ${favor}`;
+      gctx.font = 'bold 12px "ZCOOL KuaiLe",sans-serif';
+      gctx.textAlign = 'center';
+      gctx.textBaseline = 'middle';
+      const textW = gctx.measureText(label).width;
+      const boxW = textW + 12;
+      const boxH = 16;
+      const boxX = cx - boxW / 2;
+      const boxY = feetY - 100;
+      // 气泡背景
+      gctx.fillStyle = 'rgba(255, 240, 245, 0.95)';
+      gctx.fillRect(boxX, boxY, boxW, boxH);
+      // 粉色边框
+      gctx.fillStyle = '#e8b8c0';
+      gctx.fillRect(boxX, boxY, boxW, 1);
+      gctx.fillRect(boxX, boxY + boxH - 1, boxW, 1);
+      gctx.fillRect(boxX, boxY, 1, boxH);
+      gctx.fillRect(boxX + boxW - 1, boxY, 1, boxH);
+      // 小尾巴
+      gctx.fillStyle = 'rgba(255, 240, 245, 0.95)';
+      gctx.beginPath();
+      gctx.moveTo(cx - 4, boxY + boxH);
+      gctx.lineTo(cx, boxY + boxH + 5);
+      gctx.lineTo(cx + 4, boxY + boxH);
+      gctx.fill();
+      // 文字
+      gctx.fillStyle = '#8b3a4a';
+      gctx.fillText(label, cx, boxY + boxH / 2);
+    }
+
+    // === 右上角名字显示（点击后显示）===
+    if (showXiaoguMenu) {
+      const nameLabel = '小谷';
+      gctx.font = 'bold 13px "ZCOOL KuaiLe",sans-serif';
+      gctx.textAlign = 'left';
+      gctx.textBaseline = 'middle';
+      const nameW = gctx.measureText(nameLabel).width;
+      const nameBoxW = nameW + 8;
+      const nameBoxH = 18;
+      const nameBoxX = cx + 22;
+      const nameBoxY = feetY - 78;
+      gctx.fillStyle = '#fff5f0';
+      gctx.fillRect(nameBoxX, nameBoxY, nameBoxW, nameBoxH);
+      gctx.fillStyle = '#e8b8c0';
+      gctx.fillRect(nameBoxX, nameBoxY, nameBoxW, 1);
+      gctx.fillRect(nameBoxX, nameBoxY + nameBoxH - 1, nameBoxW, 1);
+      gctx.fillRect(nameBoxX, nameBoxY, 1, nameBoxH);
+      gctx.fillRect(nameBoxX + nameBoxW - 1, nameBoxY, 1, nameBoxH);
+      gctx.fillStyle = '#8b3a4a';
+      gctx.fillText(nameLabel, nameBoxX + 4, nameBoxY + nameBoxH / 2);
+    }
+  }
+
+  function renderTeachingScene() {
+    if (!gctx) return;
+    const W = 960, H = 540;
+    gctx.clearRect(0, 0, W, H);
+
+    // === 走廊墙壁 ===
+    // 墙壁下半部分（浅米色）
+    gctx.fillStyle = '#e8dcc0';
+    gctx.fillRect(0, 0, W, 380);
+    // 墙壁上半部分（白色）
+    gctx.fillStyle = '#f5f0e8';
+    gctx.fillRect(0, 0, W, 180);
+    // 墙裙线
+    gctx.fillStyle = '#c8b088';
+    gctx.fillRect(0, 178, W, 4);
+    gctx.fillRect(0, 376, W, 4);
+
+    // === 地面（走廊地砖）===
+    gctx.fillStyle = '#d0c0a0';
+    gctx.fillRect(0, 380, W, H - 380);
+    // 地砖格子
+    gctx.fillStyle = 'rgba(150,120,80,0.2)';
+    for (let x = 0; x < W; x += 60) {
+      gctx.fillRect(x, 380, 1, H - 380);
+    }
+    for (let y = 380; y < H; y += 40) {
+      gctx.fillRect(0, y, W, 1);
+    }
+
+    // === 顶部照明（长条形荧光灯）===
+    for (let i = 0; i < 5; i++) {
+      const lx = 80 + i * 180;
+      const ly = 20;
+      gctx.fillStyle = '#e8e8e8';
+      gctx.fillRect(lx, ly, 120, 12);
+      gctx.fillStyle = '#ffffff';
+      gctx.fillRect(lx + 2, ly + 2, 116, 8);
+      gctx.fillStyle = 'rgba(255,255,200,0.3)';
+      gctx.fillRect(lx - 10, ly + 12, 140, 30);
+    }
+
+    // === 窗户（走廊一侧，上方）===
+    for (let i = 0; i < 4; i++) {
+      const wx = 520 + i * 110;
+      const wy = 50;
+      // 窗框
+      gctx.fillStyle = '#6a7a8a';
+      gctx.fillRect(wx - 3, wy - 3, 96, 76);
+      // 玻璃
+      gctx.fillStyle = 'rgba(140,180,220,0.5)';
+      gctx.fillRect(wx, wy, 90, 70);
+      // 窗格
+      gctx.fillStyle = '#6a7a8a';
+      gctx.fillRect(wx + 43, wy, 4, 70);
+      gctx.fillRect(wx, wy + 33, 90, 4);
+    }
+
+    // === 公告栏 ===
+    gctx.fillStyle = '#8b6914';
+    gctx.fillRect(40, 60, 120, 80);
+    gctx.fillStyle = '#f5e8c8';
+    gctx.fillRect(45, 65, 110, 70);
+    gctx.fillStyle = '#3a2a1a';
+    gctx.font = 'bold 12px "ZCOOL KuaiLe",sans-serif';
+    gctx.textAlign = 'center';
+    gctx.fillText('📋 公告栏', 100, 82);
+    gctx.font = '10px "ZCOOL KuaiLe",sans-serif';
+    gctx.fillText('本周课程表', 100, 100);
+    gctx.fillText('期末考试安排', 100, 115);
+    gctx.fillText('社团招新', 100, 130);
+
+    // === 自动售货机（最左边）===
+    drawVendingMachine(60, 240);
+
+    // === 小谷（售货机旁边）===
+    drawXiaogu(180, 380 + 100);
+
+    // === 小谷交互菜单 ===
+    if (showXiaoguMenu) {
+      const menuX = 220;
+      const menuY = 410;
+      const menuW = 90;
+      const menuH = 24;
+      const gap = 4;
+      const menuItems = ['对话', '送礼', '返回'];
+
+      gctx.fillStyle = '#f5f0e0';
+      gctx.fillRect(menuX - 2, menuY - 2, menuW + 4, menuH * 3 + gap * 2 + 4);
+      gctx.fillStyle = '#c8a574';
+      gctx.fillRect(menuX - 2, menuY - 2, menuW + 4, 2);
+      gctx.fillRect(menuX - 2, menuY + menuH * 3 + gap * 2, menuW + 4, 2);
+      gctx.fillRect(menuX - 2, menuY - 2, 2, menuH * 3 + gap * 2 + 4);
+      gctx.fillRect(menuX + menuW, menuY - 2, 2, menuH * 3 + gap * 2 + 4);
+
+      menuItems.forEach((item, idx) => {
+        const by = menuY + idx * (menuH + gap);
+        gctx.fillStyle = '#e8dcc0';
+        gctx.fillRect(menuX, by, menuW, menuH);
+        gctx.fillStyle = '#5c3a1a';
+        gctx.font = '14px sans-serif';
+        gctx.textAlign = 'center';
+        gctx.textBaseline = 'middle';
+        gctx.fillText(item, menuX + menuW / 2, by + menuH / 2);
+      });
+    }
+
+    // === 教室门（往右边几间）===
+    drawClassroomDoor(280, 280, '101');
+    drawClassroomDoor(500, 280, '102');
+    drawClassroomDoor(720, 280, '103');
+
+    // === 走廊尽头的楼梯间 ===
+    gctx.fillStyle = '#5a5a60';
+    gctx.fillRect(W - 70, 250, 60, 130);
+    gctx.fillStyle = '#4a4a50';
+    gctx.fillRect(W - 65, 255, 50, 120);
+    // 楼梯标识
+    gctx.fillStyle = '#ffffff';
+    gctx.font = 'bold 14px "ZCOOL KuaiLe",sans-serif';
+    gctx.textAlign = 'center';
+    gctx.fillText('楼梯', W - 40, 320);
+
+    // === 主角（动态位置）===
+    drawDormPlayer(playerX, playerY, playerFacing, playerStepFrame);
+    drawSceneItems();
   }
 
   /* ==========================================================
@@ -1294,15 +2448,100 @@ document.addEventListener('DOMContentLoaded', function() {
     gctx.fillText('🚿 卫生间', (bathX + bathX + bathW) / 2, bathY - 14);
 
     // === 室友们（坐在各自书桌前，按图中像素风格）===
-    // 室友1：右上书桌（书桌2，x=340），穿蓝色T恤
-    drawRoommatePixel(365, 150, '#4a8ac8');
-    // 室友2：右下书桌（书桌3，x=340），穿绿色T恤
-    drawRoommatePixel(365, H - 30 - 80, '#e86a4a');
-    // 室友3：左上书桌（书桌0，x=40），穿橙色T恤
-    drawRoommatePixel(65, 150, '#e8a04a');
+    // 老信：右上书桌（书桌2，x=340），穿蓝色T恤
+    drawRoommatePixel(ROOMMATES[0].cx, ROOMMATES[0].feetY, ROOMMATES[0].color);
+    // 老王：右下书桌（书桌3，x=340），穿橙色T恤
+    drawRoommatePixel(ROOMMATES[1].cx, ROOMMATES[1].feetY, ROOMMATES[1].color);
+    // 老唐：左上书桌（书桌0，x=40），穿橙色T恤
+    drawRoommatePixel(ROOMMATES[2].cx, ROOMMATES[2].feetY, ROOMMATES[2].color);
+
+    // === 室友交互菜单 ===
+    if (showRoommateMenu) {
+      const rm = ROOMMATES.find(r => r.key === showRoommateMenu);
+      if (rm) {
+        const menuW = 90;
+        const menuH = 24;
+        const gap = 4;
+        const menuItems = ['对话', '送礼', '返回'];
+        // 菜单位置：在室友右侧，如果太靠右则放左侧
+        let menuX = rm.cx + 30;
+        if (menuX + menuW > 920) menuX = rm.cx - 30 - menuW;
+        let menuY = rm.feetY - 60;
+        if (menuY < 30) menuY = rm.feetY + 10;
+
+        gctx.fillStyle = '#f5f0e0';
+        gctx.fillRect(menuX - 2, menuY - 2, menuW + 4, menuH * 3 + gap * 2 + 4);
+        gctx.fillStyle = '#c8a574';
+        gctx.fillRect(menuX - 2, menuY - 2, menuW + 4, 2);
+        gctx.fillRect(menuX - 2, menuY + menuH * 3 + gap * 2, menuW + 4, 2);
+        gctx.fillRect(menuX - 2, menuY - 2, 2, menuH * 3 + gap * 2 + 4);
+        gctx.fillRect(menuX + menuW, menuY - 2, 2, menuH * 3 + gap * 2 + 4);
+
+        menuItems.forEach((item, idx) => {
+          const by = menuY + idx * (menuH + gap);
+          gctx.fillStyle = '#e8dcc0';
+          gctx.fillRect(menuX, by, menuW, menuH);
+          gctx.fillStyle = '#5c3a1a';
+          gctx.font = '14px sans-serif';
+          gctx.textAlign = 'center';
+          gctx.textBaseline = 'middle';
+          gctx.fillText(item, menuX + menuW / 2, by + menuH / 2);
+        });
+
+        // 室友头顶好感度气泡
+        if (currentGameData && currentGameData.roommateFavors) {
+          const favor = currentGameData.roommateFavors[rm.key] || 0;
+          const label = `💕 ${favor}`;
+          gctx.font = 'bold 12px "ZCOOL KuaiLe",sans-serif';
+          gctx.textAlign = 'center';
+          gctx.textBaseline = 'middle';
+          const textW = gctx.measureText(label).width;
+          const boxW = textW + 12;
+          const boxH = 16;
+          const boxX = rm.cx - boxW / 2;
+          const boxY = rm.feetY - 95;
+          gctx.fillStyle = 'rgba(255, 240, 245, 0.95)';
+          gctx.fillRect(boxX, boxY, boxW, boxH);
+          gctx.fillStyle = '#e8b8c0';
+          gctx.fillRect(boxX, boxY, boxW, 1);
+          gctx.fillRect(boxX, boxY + boxH - 1, boxW, 1);
+          gctx.fillRect(boxX, boxY, 1, boxH);
+          gctx.fillRect(boxX + boxW - 1, boxY, 1, boxH);
+          gctx.fillStyle = 'rgba(255, 240, 245, 0.95)';
+          gctx.beginPath();
+          gctx.moveTo(rm.cx - 4, boxY + boxH);
+          gctx.lineTo(rm.cx, boxY + boxH + 5);
+          gctx.lineTo(rm.cx + 4, boxY + boxH);
+          gctx.fill();
+          gctx.fillStyle = '#8b3a4a';
+          gctx.fillText(label, rm.cx, boxY + boxH / 2);
+        }
+
+        // 右上角名字显示
+        const nameLabel = rm.name;
+        gctx.font = 'bold 13px "ZCOOL KuaiLe",sans-serif';
+        gctx.textAlign = 'left';
+        gctx.textBaseline = 'middle';
+        const nameW = gctx.measureText(nameLabel).width;
+        const nameBoxW = nameW + 8;
+        const nameBoxH = 18;
+        const nameBoxX = rm.cx + 22;
+        const nameBoxY = rm.feetY - 78;
+        gctx.fillStyle = '#fff5f0';
+        gctx.fillRect(nameBoxX, nameBoxY, nameBoxW, nameBoxH);
+        gctx.fillStyle = '#c8a574';
+        gctx.fillRect(nameBoxX, nameBoxY, nameBoxW, 1);
+        gctx.fillRect(nameBoxX, nameBoxY + nameBoxH - 1, nameBoxW, 1);
+        gctx.fillRect(nameBoxX, nameBoxY, 1, nameBoxH);
+        gctx.fillRect(nameBoxX + nameBoxW - 1, nameBoxY, 1, nameBoxH);
+        gctx.fillStyle = '#5c3a1a';
+        gctx.fillText(nameLabel, nameBoxX + 4, nameBoxY + nameBoxH / 2);
+      }
+    }
 
     // === 主角小白（动态坐标，鼠标点击控制移动）===
     drawDormPlayer(playerX, playerY, playerFacing, playerStepFrame);
+    drawSceneItems();
   }
 
   function drawDormDoor(x, y, w, h) {
@@ -1690,13 +2929,269 @@ document.addEventListener('DOMContentLoaded', function() {
     // 兼容旧存档：确保新字段有默认值
     const defaults = createNewSaveData();
     currentGameData = Object.assign({}, defaults, data);
+    // 兼容旧存档：确保室友好感度字段存在
+    if (!currentGameData.roommateFavors) {
+      currentGameData.roommateFavors = { xin: 0, wang: 0, tang: 0 };
+    }
+    ensureScheduleState(currentGameData);
     window._currentGameData = currentGameData;
     showPage('game');
+    // 进入游戏后启动背景音乐
+    if (window.gameAudio) gameAudio.startBgm();
   }
 
   function saveToSlot(slotNum) {
     if (!currentGameData) return;
     writeSave(slotNum, Object.assign({}, currentGameData));
+  }
+
+  // 地点对应的 Canvas 场景渲染函数
+  const SCENE_FNS = {
+    dorm: renderDormScene,
+    teaching: renderTeachingScene,
+    outdoor: renderOutdoorScene,
+  };
+
+  /* ==========================================================
+     操场场景 Canvas 渲染（参考图样式）
+     ========================================================== */
+  function renderOutdoorScene() {
+    if (!gctx) return;
+    const W = 960, H = 540;
+    gctx.clearRect(0, 0, W, H);
+
+    // === 天空背景 ===
+    const sky = gctx.createLinearGradient(0, 0, 0, 200);
+    sky.addColorStop(0, '#87ceeb');
+    sky.addColorStop(1, '#e0f4ff');
+    gctx.fillStyle = sky;
+    gctx.fillRect(0, 0, W, 200);
+
+    // === 远景建筑（背景层）===
+    gctx.fillStyle = '#b8c4d4';
+    gctx.fillRect(0, 120, W, 80);
+    gctx.fillStyle = '#8a9db8';
+    for (let i = 0; i < 20; i++) {
+      gctx.fillRect(i * 50 + 10, 100 + (i % 3) * 25, 35, 20);
+    }
+
+    // === 云朵 ===
+    drawOutdoorCloud(gctx, 150, 60);
+    drawOutdoorCloud(gctx, 450, 40);
+    drawOutdoorCloud(gctx, 720, 70);
+
+    // === 看台（观众席）===
+    // 看台顶棚
+    gctx.fillStyle = '#d0d0d0';
+    gctx.fillRect(0, 180, W, 15);
+    // 顶棚阴影
+    gctx.fillStyle = '#a0a0a0';
+    gctx.fillRect(0, 192, W, 3);
+    // 柱子
+    gctx.fillStyle = '#9a9a9a';
+    const pillars = [80, 180, 280, 380, 480, 580, 680, 780, 880];
+    pillars.forEach(px => {
+      gctx.fillRect(px - 6, 195, 12, 65);
+    });
+    // 阶梯座位
+    gctx.fillStyle = '#c0c0c0';
+    for (let row = 0; row < 6; row++) {
+      gctx.fillRect(0, 195 + row * 11, W, 8);
+      gctx.fillStyle = '#a8a8a8';
+    }
+    // 座位纹理
+    gctx.fillStyle = '#b0b0b0';
+    for (let col = 0; col < 40; col++) {
+      for (let row = 0; row < 6; row++) {
+        gctx.fillRect(col * 24 + 4, 198 + row * 11, 10, 4);
+      }
+    }
+    // 跑道上方的边缘
+    gctx.fillStyle = '#808080';
+    gctx.fillRect(0, 260, W, 5);
+
+    // === 跑道（外圈）===
+    gctx.fillStyle = '#c84a4a';
+    gctx.fillRect(0, 265, W, 60);
+    // 跑道内边缘
+    gctx.fillStyle = '#a03232';
+    gctx.fillRect(0, 265, W, 3);
+    // 跑道白线（分道线）
+    gctx.fillStyle = '#fff';
+    gctx.fillRect(0, 285, W, 2);
+    gctx.fillRect(0, 305, W, 2);
+
+    // === 足球场（中心内场）===
+    gctx.fillStyle = '#4a9a3a';
+    gctx.fillRect(0, 325, W, 100);
+    // 草地纹理
+    gctx.fillStyle = '#3a8a2a';
+    for (let i = 0; i < 50; i++) {
+      const gx = (i * 23) % W;
+      const gy = 330 + (i * 19) % 90;
+      gctx.fillRect(gx, gy, 2, 4);
+    }
+    // 球场边线
+    gctx.strokeStyle = '#fff';
+    gctx.lineWidth = 3;
+    gctx.strokeRect(10, 330, W - 20, 90);
+    // 中圈
+    gctx.beginPath();
+    gctx.arc(W / 2, 375, 35, 0, Math.PI * 2);
+    gctx.stroke();
+    // 中线
+    gctx.beginPath();
+    gctx.moveTo(W / 2, 330);
+    gctx.lineTo(W / 2, 420);
+    gctx.stroke();
+    // 左球门区
+    gctx.strokeRect(10, 355, 60, 30);
+    // 右球门区
+    gctx.strokeRect(W - 70, 355, 60, 30);
+    // 左球门
+    gctx.fillStyle = '#fff';
+    gctx.fillRect(10, 365, 6, 20);
+    gctx.fillRect(3, 360, 20, 4);
+    gctx.fillRect(3, 380, 20, 4);
+    // 右球门
+    gctx.fillRect(W - 16, 365, 6, 20);
+    gctx.fillRect(W - 23, 360, 20, 4);
+    gctx.fillRect(W - 23, 380, 20, 4);
+
+    // === 下方跑道（玩家所在）===
+    gctx.fillStyle = '#c84a4a';
+    gctx.fillRect(0, 425, W, 60);
+    // 跑道白线
+    gctx.fillStyle = '#fff';
+    gctx.fillRect(0, 445, W, 2);
+
+    // === 下方台阶区域 ===
+    gctx.fillStyle = '#b8b8b8';
+    gctx.fillRect(0, 485, W, 55);
+    // 台阶
+    gctx.fillStyle = '#a8a8a8';
+    gctx.fillRect(0, 485, W, 8);
+    gctx.fillRect(0, 498, W, 8);
+    gctx.fillRect(0, 511, W, 8);
+    gctx.fillRect(0, 524, W, 8);
+
+    // === 跑道上的行人 ===
+    drawRunner(gctx, 80, 295, '#4a8ac8');
+    drawRunner(gctx, 200, 295, '#e86a4a');
+    drawRunner(gctx, 350, 295, '#4a8ac8');
+    drawRunner(gctx, 500, 295, '#e8a04a');
+    drawRunner(gctx, 650, 295, '#4a8ac8');
+    drawRunner(gctx, 780, 295, '#e86a4a');
+
+    // === 足球场踢球的人 ===
+    drawSoccerPlayer(gctx, 120, 385);
+    drawSoccerPlayer(gctx, W / 2 + 50, 370);
+
+    // === 看台上方的角色 ===
+    drawTennisPlayer(gctx, 680, 220);
+
+    // === 标题 ===
+    gctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+    gctx.font = 'bold 20px "ZCOOL KuaiLe", sans-serif';
+    gctx.textAlign = 'center';
+    gctx.fillText('🏟️ 操 场', W / 2, 30);
+
+    // === 时段提示 ===
+    const timeSlot = currentGameData ? currentGameData.timeSlot : 0;
+    const slotNames = ['上午', '中午', '下午', '傍晚', '夜晚', '深夜'];
+    const dayNight = (timeSlot === 0 || timeSlot === 1 || timeSlot === 2) ? '☀️' :
+                     (timeSlot === 3) ? '🌅' : '🌙';
+    gctx.font = '14px "ZCOOL KuaiLe", sans-serif';
+    gctx.fillStyle = '#3a1a05';
+    gctx.textAlign = 'left';
+    gctx.fillText(`${dayNight} ${slotNames[timeSlot] || ''}`, 12, 28);
+
+    drawSceneItems();
+  }
+
+  // 绘制跑步的人
+  function drawRunner(ctx, x, y, color) {
+    // 头
+    ctx.fillStyle = '#f5d0b8';
+    ctx.fillRect(x - 6, y - 18, 12, 12);
+    // 身体
+    ctx.fillStyle = color;
+    ctx.fillRect(x - 8, y - 6, 16, 10);
+    // 短裤
+    ctx.fillStyle = '#2a2a2a';
+    ctx.fillRect(x - 7, y + 4, 14, 8);
+    // 腿
+    ctx.fillStyle = '#f5d0b8';
+    ctx.fillRect(x - 5, y + 10, 4, 8);
+    ctx.fillRect(x + 1, y + 10, 4, 8);
+    // 手臂摆动
+    ctx.fillStyle = '#f5d0b8';
+    ctx.fillRect(x - 12, y - 4, 6, 3);
+    ctx.fillRect(x + 6, y - 4, 6, 3);
+    // 鞋子
+    ctx.fillStyle = '#1a1a1a';
+    ctx.fillRect(x - 6, y + 16, 5, 4);
+    ctx.fillRect(x + 1, y + 16, 5, 4);
+  }
+
+  // 绘制踢足球的人
+  function drawSoccerPlayer(ctx, x, y) {
+    // 头
+    ctx.fillStyle = '#f5d0b8';
+    ctx.fillRect(x - 5, y - 16, 10, 10);
+    // 身体
+    ctx.fillStyle = '#e84a4a';
+    ctx.fillRect(x - 6, y - 4, 12, 8);
+    // 短裤
+    ctx.fillStyle = '#2a2a2a';
+    ctx.fillRect(x - 5, y + 4, 10, 6);
+    // 腿
+    ctx.fillStyle = '#f5d0b8';
+    ctx.fillRect(x - 4, y + 10, 3, 8);
+    ctx.fillRect(x + 1, y + 10, 3, 8);
+    // 足球
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(x + 12, y + 16, 6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#1a1a1a';
+    ctx.beginPath();
+    ctx.arc(x + 14, y + 15, 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // 绘制打网球的人（看台上）
+  function drawTennisPlayer(ctx, x, y) {
+    // 头
+    ctx.fillStyle = '#f5d0b8';
+    ctx.fillRect(x - 4, y - 14, 8, 8);
+    // 身体
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(x - 5, y - 4, 10, 8);
+    // 短裙
+    ctx.fillStyle = '#2a2a2a';
+    ctx.fillRect(x - 5, y + 4, 10, 6);
+    // 腿
+    ctx.fillStyle = '#f5d0b8';
+    ctx.fillRect(x - 3, y + 10, 3, 6);
+    ctx.fillRect(x + 0, y + 10, 3, 6);
+    // 球拍
+    ctx.fillStyle = '#e8a04a';
+    ctx.fillRect(x + 8, y - 12, 8, 2);
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(x + 14, y - 12, 8, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // 操场云朵绘制（独立函数，避免与封面drawCloud冲突）
+  function drawOutdoorCloud(ctx, x, y) {
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(x, y, 15, 0, Math.PI * 2);
+    ctx.arc(x + 15, y - 6, 18, 0, Math.PI * 2);
+    ctx.arc(x + 32, y, 14, 0, Math.PI * 2);
+    ctx.fill();
   }
 
   /* ==========================================================
@@ -1791,6 +3286,11 @@ document.addEventListener('DOMContentLoaded', function() {
     stopGameLoop();
     showPage('cover');
   });
+  bindClick('btn-fail-back-title', () => {
+    currentGameData = null;
+    currentGameSlot = null;
+    showPage('cover');
+  });
 
   /* ==========================================================
      手机界面
@@ -1801,78 +3301,133 @@ document.addEventListener('DOMContentLoaded', function() {
     if (btnPhone) {
       const phoneOverlay = document.getElementById('phone-overlay');
       if (phoneOverlay) phoneOverlay.classList.add('active');
+      if (window.gameAudio) { gameAudio.init(); gameAudio.play('open'); }
     }
     if (btnPhoneClose) {
       const phoneOverlay = document.getElementById('phone-overlay');
       if (phoneOverlay) phoneOverlay.classList.remove('active');
+      if (window.gameAudio) gameAudio.play('close');
     }
   });
 
   APP_CONTENTS = {
-    calendar: {
-      title: '📅 日历',
-      html: function() { return `
-        <div class="app-calendar">
-          <div class="cal-date">
-            <div class="cal-semester">${YEAR_NAMES[Math.min(YEAR_NAMES.length - 1, Math.ceil(currentGameData.day / 90) - 1)]}</div>
-            <div class="cal-day">${WEEKDAYS[(currentGameData.day - 1) % 7]}</div>
-            <div class="cal-week">第 ${currentGameData.day} 天</div>
+    baolema: {
+      title: '🍔 饱了吗',
+      html: function() {
+        const canOrder = [0, 1, 3].includes(currentGameData.timeSlot);
+        const nextSlot = currentGameData.timeSlot === 2 ? '傍晚' :
+                         currentGameData.timeSlot === 4 ? '明天上午' :
+                         currentGameData.timeSlot === 5 ? '明天上午' : '稍后';
+        if (!canOrder) {
+          return `
+        <div class="app-baolema">
+          <div class="baolema-banner">🎉 新用户立减5元！</div>
+          <div class="shop-balance">💰 余额：<strong>${currentGameData.money}</strong> 元</div>
+          <div class="baolema-closed">
+            <div class="baolema-closed-icon">🍽️</div>
+            <div class="baolema-closed-title">当前时段暂不营业</div>
+            <div class="baolema-closed-desc">现在是${TIME_SLOTS[currentGameData.timeSlot]}，外卖小哥正在休息~</div>
+            <div class="baolema-closed-time">可点时段：上午、中午、傍晚</div>
+            <div class="baolema-closed-next">⏰ 下次营业：${nextSlot}</div>
           </div>
-          <div class="cal-tips">
-            <p>🕒 当前时段：${TIME_SLOTS[currentGameData.timeSlot]}</p>
-            <p>📅 每学年总天数：90天</p>
-            <p>📚 共 360 天可毕业</p>
+          <div class="baolema-tip">💡 吃饱了才有力气学习！</div>
+        </div>`;
+        }
+        return `
+        <div class="app-baolema">
+          <div class="baolema-banner">🎉 新用户立减5元！</div>
+          <div class="shop-balance">💰 余额：<strong>${currentGameData.money}</strong> 元</div>
+          <div class="shop-items">
+            <div class="shop-item-row">
+              <div class="item-info"><span class="item-emoji">🍜</span> <span>牛肉面</span></div>
+              <div class="item-price">15元</div>
+              <div class="item-effect">❤️+3</div>
+              <button class="pixel-btn baolema-buy" data-item="noodle" data-price="15" data-health="3">下单</button>
+            </div>
+            <div class="shop-item-row">
+              <div class="item-info"><span class="item-emoji">🍱</span> <span>便当</span></div>
+              <div class="item-price">20元</div>
+              <div class="item-effect">❤️+5</div>
+              <button class="pixel-btn baolema-buy" data-item="bento" data-price="20" data-health="5">下单</button>
+            </div>
+            <div class="shop-item-row">
+              <div class="item-info"><span class="item-emoji">🍔</span> <span>汉堡套餐</span></div>
+              <div class="item-price">18元</div>
+              <div class="item-effect">❤️+4</div>
+              <button class="pixel-btn baolema-buy" data-item="burger" data-price="18" data-health="4">下单</button>
+            </div>
           </div>
-        </div>`; }
+          <div class="baolema-tip">💡 吃饱了才有力气学习！</div>
+        </div>`;
+      }
     },
     group: {
       title: '👥 科大小组手',
-      html: function() { return `
+      html: function() {
+        const d = currentGameData;
+        const yearIdx = Math.min(YEAR_NAMES.length - 1, Math.ceil(d.day / 90) - 1);
+        const isSophomore = yearIdx >= 1;
+        const electives = d.electives || [];
+        const selectedElectiveCount = electives.length;
+        const remainingElectives = Math.max(0, MAX_ELECTIVES - selectedElectiveCount);
+        const totalCourseLoad = countScheduleCourses(d.schedule || {});
+
+        // 必修课程学分表
+        let requiredHtml = '';
+        COURSES.forEach(c => {
+          const info = COURSE_INFO[c.name];
+          if (info) {
+            const progStr = info.program > 0 ? `<span class="elec-bonus">💻 +${info.program}</span>` : '';
+            requiredHtml += `
+              <div class="elec-item">
+                <div class="elec-info">
+                  <div class="elec-name">${c.name}</div>
+                  <div class="elec-desc">${c.loc} · ${c.type === 'sch-prog' ? '编程课' : c.type === 'sch-comp' ? '计算机基础' : c.type === 'sch-math' ? '理科' : c.type === 'sch-eng' ? '文科' : '体育'}</div>
+                </div>
+                <div class="elec-stats">
+                  <span class="elec-credit">学分 ${info.credits}</span>
+                  <span class="elec-bonus">📚 +${info.knowledge}</span>
+                  ${progStr}
+                </div>
+              </div>`;
+          }
+        });
+
+        // 选修课程列表
+        let electiveHtml = '';
+        ELECTIVE_COURSES.forEach(c => {
+          const selected = electives.includes(c.name);
+          const disabled = selected || selectedElectiveCount >= MAX_ELECTIVES;
+          const progStr = c.program > 0 ? `<span class="elec-bonus">💻 +${c.program}</span>` : '';
+          electiveHtml += `
+            <div class="elec-item ${selected ? 'elec-selected' : ''}">
+              <div class="elec-info">
+                <div class="elec-name">${c.name}</div>
+                <div class="elec-desc">${c.desc}</div>
+              </div>
+              <div class="elec-stats">
+                <span class="elec-credit">学分 ${c.credits}</span>
+                <span class="elec-bonus">📚 +${c.knowledge}</span>
+                ${progStr}
+              </div>
+              <button class="pixel-btn elec-btn ${selected ? 'elec-btn-selected' : ''}" data-elective="${c.name}" ${disabled ? 'disabled' : ''}>${selected ? '已选' : (selectedElectiveCount >= MAX_ELECTIVES ? '已满' : '选择')}</button>
+            </div>`;
+        });
+
+        return `
         <div class="app-group">
-          <div class="group-chat" id="group-chat-schedule">
+          <div class="group-tabs">
+            <button class="group-tab active" data-tab="schedule">📋 课程表</button>
+            <button class="group-tab" data-tab="credits">🎓 学分与加成</button>
+            <button class="group-tab" data-tab="elective" ${isSophomore ? '' : 'disabled'}>📝 选课${isSophomore ? '' : ' (大二解锁)'}</button>
+          </div>
+          <div class="group-content" id="group-tab-schedule">
             <div class="schedule-table">
-              <div class="schedule-header">
-                <div class="sch-cell sch-time">时间</div>
-                <div class="sch-cell">周一</div>
-                <div class="sch-cell">周二</div>
-                <div class="sch-cell">周三</div>
-                <div class="sch-cell">周四</div>
-                <div class="sch-cell">周五</div>
-              </div>
-              <div class="schedule-row">
-                <div class="sch-cell sch-time">1-2节<br><span class="sch-small">08:00-09:40</span></div>
-                <div class="sch-cell sch-course sch-math">高等数学<br><span class="sch-small">教1-201</span></div>
-                <div class="sch-cell sch-course sch-eng">大学英语<br><span class="sch-small">教2-305</span></div>
-                <div class="sch-cell sch-course sch-prog">C语言程序设计<br><span class="sch-small">实验楼A</span></div>
-                <div class="sch-cell sch-course sch-math">高等数学<br><span class="sch-small">教1-201</span></div>
-                <div class="sch-cell sch-course sch-comp">计算机导论<br><span class="sch-small">教3-108</span></div>
-              </div>
-              <div class="schedule-row">
-                <div class="sch-cell sch-time">3-4节<br><span class="sch-small">10:00-11:40</span></div>
-                <div class="sch-cell sch-course sch-comp">计算机导论<br><span class="sch-small">教3-108</span></div>
-                <div class="sch-cell"></div>
-                <div class="sch-cell sch-course sch-eng">大学英语<br><span class="sch-small">教2-305</span></div>
-                <div class="sch-cell sch-course sch-pe">体育<br><span class="sch-small">操场</span></div>
-                <div class="sch-cell sch-course sch-prog">C语言程序设计<br><span class="sch-small">实验楼A</span></div>
-              </div>
-              <div class="schedule-row">
-                <div class="sch-cell sch-time">5-6节<br><span class="sch-small">14:00-15:40</span></div>
-                <div class="sch-cell sch-course sch-pe">体育<br><span class="sch-small">操场</span></div>
-                <div class="sch-cell sch-course sch-math">高等数学<br><span class="sch-small">教1-201</span></div>
-                <div class="sch-cell"></div>
-                <div class="sch-cell sch-course sch-comp">计算机导论<br><span class="sch-small">教3-108</span></div>
-                <div class="sch-cell sch-course sch-eng">大学英语<br><span class="sch-small">教2-305</span></div>
-              </div>
-              <div class="schedule-row">
-                <div class="sch-cell sch-time">7-8节<br><span class="sch-small">16:00-17:40</span></div>
-                <div class="sch-cell"></div>
-                <div class="sch-cell sch-course sch-prog">C语言程序设计<br><span class="sch-small">实验楼A</span></div>
-                <div class="sch-cell sch-course sch-math">高等数学<br><span class="sch-small">教1-201</span></div>
-                <div class="sch-cell"></div>
-                <div class="sch-cell"></div>
-              </div>
+              ${renderScheduleTable()}
             </div>
             <div class="schedule-legend">
+              <span class="legend-item">📚 当前课程量 ${totalCourseLoad} 节/周</span>
+              <span class="legend-item">📝 选修课 ${selectedElectiveCount}/${MAX_ELECTIVES}</span>
               <span class="legend-item"><span class="legend-dot sch-math"></span>理科课程</span>
               <span class="legend-item"><span class="legend-dot sch-eng"></span>文科课程</span>
               <span class="legend-item"><span class="legend-dot sch-prog"></span>编程课程</span>
@@ -1880,7 +3435,40 @@ document.addEventListener('DOMContentLoaded', function() {
               <span class="legend-item"><span class="legend-dot sch-pe"></span>体育</span>
             </div>
           </div>
-        </div>`; }
+          <div class="group-content" id="group-tab-credits" style="display:none">
+            <div class="elec-section">
+              <div class="elec-section-title">📚 必修课程</div>
+              ${requiredHtml}
+            </div>
+            <div class="elec-section">
+              <div class="elec-section-title">📝 已选选修课</div>
+              ${electives.length > 0 ? electives.map(name => {
+                const c = ELECTIVE_COURSES.find(e => e.name === name);
+                if (!c) return '';
+                const progStr = c.program > 0 ? `<span class="elec-bonus">💻 +${c.program}</span>` : '';
+                return `<div class="elec-item elec-selected">
+                  <div class="elec-info">
+                    <div class="elec-name">${c.name}</div>
+                    <div class="elec-desc">${c.desc}</div>
+                  </div>
+                  <div class="elec-stats">
+                    <span class="elec-credit">学分 ${c.credits}</span>
+                    <span class="elec-bonus">📚 +${c.knowledge}</span>
+                    ${progStr}
+                  </div>
+                </div>`;
+              }).join('') : '<div class="elec-empty">暂未选择选修课</div>'}
+            </div>
+          </div>
+          <div class="group-content" id="group-tab-elective" style="display:none">
+            ${isSophomore ? `<div class="elec-section">
+              <div class="elec-section-title">📝 选修课程（每选 1 节，课程量 +1；需选满 ${MAX_ELECTIVES} 节）</div>
+              <div class="elec-empty">${remainingElectives > 0 ? `当前已选 ${selectedElectiveCount}/${MAX_ELECTIVES} 节，还需再选 ${remainingElectives} 节。` : `本学期选修课已选满 ${MAX_ELECTIVES}/${MAX_ELECTIVES} 节。`}</div>
+              ${electiveHtml}
+            </div>` : '<div class="elec-locked">🔒 选课功能在大二后开启</div>'}
+          </div>
+        </div>`;
+      }
     },
     shop: {
       title: '🛒 购物',
@@ -1889,16 +3477,16 @@ document.addEventListener('DOMContentLoaded', function() {
           <div class="shop-balance">💰 余额：<strong>${currentGameData.money}</strong> 元</div>
           <div class="shop-items">
             <div class="shop-item-row">
-              <div class="item-info"><span class="item-emoji">🍫</span> <span>巧克力</span></div>
-              <div class="item-price">8元</div>
-              <div class="item-effect">💻 +5</div>
-              <button class="pixel-btn shop-buy" data-item="choco" data-price="8" data-code="5">购买</button>
-            </div>
-            <div class="shop-item-row">
-              <div class="item-info"><span class="item-emoji">📖</span> <span>技术书籍</span></div>
+              <div class="item-info"><span class="item-emoji">📖</span> <span>数据结构</span></div>
               <div class="item-price">50元</div>
               <div class="item-effect">📚 +15</div>
-              <button class="pixel-btn shop-buy" data-item="book" data-price="50" data-book="15">购买</button>
+              <button class="pixel-btn shop-buy" data-item="datastruct" data-price="50" data-book="15">购买</button>
+            </div>
+            <div class="shop-item-row">
+              <div class="item-info"><span class="item-emoji">📚</span> <span>三年算法五年编程</span></div>
+              <div class="item-price">80元</div>
+              <div class="item-effect">💻 +20</div>
+              <button class="pixel-btn shop-buy" data-item="algo" data-price="80" data-code="20">购买</button>
             </div>
           </div>
         </div>`; }
@@ -1908,25 +3496,25 @@ document.addEventListener('DOMContentLoaded', function() {
       html: function() { return `
         <div class="app-chat">
           <div class="chat-list">
-            <div class="chat-contact" data-contact="roommate-a">
-              <div class="contact-avatar" style="background:#4a8ac8">A</div>
+            <div class="chat-contact" data-contact="roommate-xin">
+              <div class="contact-avatar" style="background:#4a8ac8">信</div>
               <div class="contact-info">
-                <div class="contact-name">室友A</div>
-                <div class="contact-preview">一起去图书馆？</div>
+                <div class="contact-name">老信</div>
+                <div class="contact-preview">高数作业写了吗？</div>
               </div>
             </div>
-            <div class="chat-contact" data-contact="roommate-b">
-              <div class="contact-avatar" style="background:#e86a4a">B</div>
+            <div class="chat-contact" data-contact="roommate-wang">
+              <div class="contact-avatar" style="background:#e86a4a">王</div>
               <div class="contact-info">
-                <div class="contact-name">室友B</div>
-                <div class="contact-preview">考试加油！💪</div>
+                <div class="contact-name">老王</div>
+                <div class="contact-preview">要不要一起点外卖？</div>
               </div>
             </div>
-            <div class="chat-contact" data-contact="roommate-c">
-              <div class="contact-avatar" style="background:#e8a04a">C</div>
+            <div class="chat-contact" data-contact="roommate-tang">
+              <div class="contact-avatar" style="background:#e8a04a">唐</div>
               <div class="contact-info">
-                <div class="contact-name">室友C</div>
-                <div class="contact-preview">食堂人好多...</div>
+                <div class="contact-name">老唐</div>
+                <div class="contact-preview">帮我带个饭呗</div>
               </div>
             </div>
             <div class="chat-contact" data-contact="mom">
@@ -1942,78 +3530,68 @@ document.addEventListener('DOMContentLoaded', function() {
           </div>
         </div>`; }
     },
-    call: {
-      title: '📞 电话',
-      html: function() { return `
-        <div class="app-call">
-          <div class="call-section">
-            <div class="call-section-title">📱 室友</div>
-            <div class="call-list">
-              <div class="call-contact">
-                <div class="call-avatar" style="background:#4a8ac8">A</div>
-                <div class="call-info">
-                  <div class="call-name">室友A</div>
-                  <div class="call-status">💻 正在写代码...</div>
-                </div>
-                <button class="pixel-btn call-btn" data-who="roommate-a">📞</button>
-              </div>
-              <div class="call-contact">
-                <div class="call-avatar" style="background:#e86a4a">B</div>
-                <div class="call-info">
-                  <div class="call-name">室友B</div>
-                  <div class="call-status">📚 在图书馆</div>
-                </div>
-                <button class="pixel-btn call-btn" data-who="roommate-b">📞</button>
-              </div>
-              <div class="call-contact">
-                <div class="call-avatar" style="background:#e8a04a">C</div>
-                <div class="call-info">
-                  <div class="call-name">室友C</div>
-                  <div class="call-status">🎮 在打游戏</div>
-                </div>
-                <button class="pixel-btn call-btn" data-who="roommate-c">📞</button>
-              </div>
-            </div>
-          </div>
-          <div class="call-section">
-            <div class="call-section-title">👨‍👩‍👧 家人</div>
-            <div class="call-list">
-              <div class="call-contact">
-                <div class="call-avatar" style="background:#e87a9a">妈</div>
-                <div class="call-info">
-                  <div class="call-name">妈妈</div>
-                  <div class="call-status">🏠 在家</div>
-                </div>
-                <button class="pixel-btn call-btn" data-who="mom">📞</button>
-              </div>
-            </div>
-          </div>
-          <div class="call-tips">📍 前往教学楼可解锁更多联系人</div>
+    bag: {
+      title: '🎒 背包',
+      html: function() {
+        const data = currentGameData || {};
+        let pageIdx = data.bagPageIdx || 0;
+        const totalPages = (data.bagPages && data.bagPages.length) || 3;
+        if (pageIdx < 0) pageIdx = 0;
+        if (pageIdx >= totalPages) pageIdx = totalPages - 1;
+        const pageItems = (data.bagPages && data.bagPages[pageIdx]) || new Array(15).fill(null);
+
+        // 分页切换按钮
+        const pageTabs = [];
+        for (let p = 0; p < totalPages; p++) {
+          pageTabs.push(`<button class="bag-page-tab ${p === pageIdx ? 'active' : ''}" data-page="${p}">${p + 1}</button>`);
+        }
+
+        // 格子渲染
+        const cellsHtml = pageItems.map((cell, idx) => {
+          if (cell && cell.name) {
+            return `<div class="bag-cell bag-cell-filled" data-idx="${idx}">
+              <div class="bag-cell-icon">${cell.icon || '📦'}</div>
+              <div class="bag-cell-count">${cell.count || 1}</div>
+            </div>`;
+          }
+          return `<div class="bag-cell" data-idx="${idx}"></div>`;
+        }).join('');
+
+        return `
+        <div class="app-bag">
+          <div class="bag-page-tabs">${pageTabs.join('')}</div>
+          <div class="bag-grid">${cellsHtml}</div>
         </div>`; }
     },
     settings: {
       title: '⚙️ 设置',
-      html: function() { return `
+      html: function() {
+        const soundOn = window.gameAudio ? !gameAudio.isMuted() : true;
+        const bgmVol = window.gameAudio ? Math.round(gameAudio.getBgmVolume() * 100) : 60;
+        const sfxVol = window.gameAudio ? Math.round(gameAudio.getSfxVolume() * 100) : 80;
+        return `
         <div class="app-settings">
           <div class="setting-row">
             <span>🔊 音效</span>
             <label class="switch">
-              <input type="checkbox" id="setting-sound" checked>
+              <input type="checkbox" id="setting-sound" ${soundOn ? 'checked' : ''} onchange="if(window.gameAudio){gameAudio.setMuted(!this.checked);if(this.checked)gameAudio.play('click');}">
               <span class="slider"></span>
             </label>
           </div>
           <div class="setting-row">
+            <span>音效音量</span>
+            <input type="range" min="0" max="100" value="${sfxVol}" oninput="if(window.gameAudio){gameAudio.setSfxVolume(this.value/100);}" class="volume-slider">
+          </div>
+          <div class="setting-row">
             <span>🎵 音乐</span>
             <label class="switch">
-              <input type="checkbox" id="setting-music" checked>
+              <input type="checkbox" id="setting-music" ${window.gameAudio && gameAudio.isBgmEnabled() ? 'checked' : ''} onchange="if(window.gameAudio){gameAudio.setBgmEnabled(this.checked);}">
               <span class="slider"></span>
             </label>
           </div>
-          <div class="setting-divider"></div>
-          <div class="setting-info">
-            <p>📖 游戏帮助</p>
-            <p class="setting-desc">点击地图上的地点移动，消耗体力。</p>
-            <p class="setting-desc">在寝室可以学习、写代码或社交。</p>
+          <div class="setting-row">
+            <span>音乐音量</span>
+            <input type="range" min="0" max="100" value="${bgmVol}" oninput="if(window.gameAudio){gameAudio.setBgmVolume(this.value/100);}" class="volume-slider">
           </div>
           <div class="setting-divider"></div>
           <div class="setting-version">🎮 校园生存模拟器 v0.1</div>
@@ -2026,6 +3604,7 @@ document.addEventListener('DOMContentLoaded', function() {
   // 定义 openApp 并挂到 window，供 HTML onclick 调用
   window.openApp = function(appName) {
     if (!APP_CONTENTS[appName]) return;
+    if (window.gameAudio) { gameAudio.init(); gameAudio.play('open'); }
     const info = APP_CONTENTS[appName];
     const phoneOverlay = document.getElementById('phone-overlay');
     const appTitle = document.getElementById('app-title-text');
@@ -2040,21 +3619,125 @@ document.addEventListener('DOMContentLoaded', function() {
       buyBtn.addEventListener('click', () => {
         const price = parseInt(buyBtn.dataset.price, 10);
         if (!currentGameData || currentGameData.money < price) {
+          if (window.gameAudio) gameAudio.play('error');
           openSimpleNotice('💰 金钱不足！');
           return;
         }
         currentGameData.money -= price;
         if (buyBtn.dataset.code) {
           currentGameData.programming = Math.min(500, currentGameData.programming + parseInt(buyBtn.dataset.code, 10));
+          if (window.gameAudio) gameAudio.play('buy');
           openSimpleNotice('✅ 购买成功！编程能力 +' + buyBtn.dataset.code);
         }
         if (buyBtn.dataset.book) {
           currentGameData.knowledge = Math.min(500, currentGameData.knowledge + parseInt(buyBtn.dataset.book, 10));
+          if (window.gameAudio) gameAudio.play('buy');
           openSimpleNotice('✅ 购买成功！知识 +' + buyBtn.dataset.book);
         }
         updateGameUI();
       });
     });
+    // 绑定饱了吗下单按钮
+    document.querySelectorAll('.baolema-buy').forEach(buyBtn => {
+      buyBtn.addEventListener('click', () => {
+        if (![0, 1, 3].includes(currentGameData.timeSlot)) {
+          if (window.gameAudio) gameAudio.play('error');
+          openSimpleNotice('🍽️ 当前时段暂不营业\n可点时段：上午、中午、傍晚');
+          return;
+        }
+        const price = parseInt(buyBtn.dataset.price, 10);
+        const item = buyBtn.dataset.item;
+        const itemNames = {
+          burger: '汉堡套餐',
+          noodle: '牛肉面',
+          bento: '便当'
+        };
+        if (!currentGameData || currentGameData.money < price) {
+          if (window.gameAudio) gameAudio.play('error');
+          openSimpleNotice('💰 金钱不足！');
+          return;
+        }
+        currentGameData.money -= price;
+        if (window.gameAudio) gameAudio.play('eat');
+
+        // 标记对应餐食已吃
+        const d = currentGameData;
+        let mealName = '';
+        if (d.timeSlot === 0) {
+          d.breakfastEaten = true;
+          mealName = '早餐';
+        } else if (d.timeSlot === 1) {
+          d.lunchEaten = true;
+          mealName = '午餐';
+        } else if (d.timeSlot === 3) {
+          d.dinnerEaten = true;
+          mealName = '晚餐';
+        }
+
+        let gain = [];
+        if (buyBtn.dataset.health) {
+          d.health = Math.min(100, d.health + parseInt(buyBtn.dataset.health, 10));
+          gain.push('❤️+' + buyBtn.dataset.health);
+        }
+        const isGameOver = advanceTime(1);
+        if (isGameOver) return;
+        let msg = '🍔 ' + (itemNames[item] || item) + ' 送到啦！';
+        if (mealName) {
+          msg += '\n🍚 ' + mealName + '搞定！';
+        }
+        if (gain.length > 0) {
+          msg += '\n吃饱了！' + gain.join(' ');
+        }
+        msg += `\n现在是${TIME_SLOTS[d.timeSlot]}，${WEEKDAYS[(d.day - 1) % 7]}`;
+        if (d._lastMissedSleep) {
+          msg += `\n😫 昨晚没睡觉！健康 -10`;
+        }
+        if (d._lastHealthLost > 0) {
+          msg += `\n😫 饿肚子了！健康 -${d._lastHealthLost}（没吃${d._lastMissedMeals.filter(m => m !== '睡觉').join('、')}）`;
+        }
+        openSimpleNotice(msg);
+        const appOverlay = document.getElementById('app-overlay');
+        if (appOverlay) appOverlay.classList.remove('active');
+        updateGameUI();
+      });
+    });
+    if (appContent) {
+      appContent.onclick = null;
+    }
+    if (appName === 'group' && appContent) {
+      appContent.onclick = e => {
+        const tab = e.target.closest('.group-tab[data-tab]');
+        if (tab) {
+          if (tab.disabled) return;
+          appContent.querySelectorAll('.group-tab[data-tab]').forEach(t => t.classList.remove('active'));
+          tab.classList.add('active');
+          appContent.querySelectorAll('.group-content').forEach(c => c.style.display = 'none');
+          const target = appContent.querySelector('#group-tab-' + tab.dataset.tab);
+          if (target) target.style.display = '';
+          return;
+        }
+
+        const btn = e.target.closest('.elec-btn');
+        if (btn) {
+          const result = trySelectElectiveCourse(btn.dataset.elective);
+          openSimpleNotice(result.message);
+          if (!result.ok) return;
+          appContent.innerHTML = info.html();
+          const electiveTabBtn = appContent.querySelector('.group-tab[data-tab="elective"]');
+          const electiveTabPanel = appContent.querySelector('#group-tab-elective');
+          const scheduleTabPanel = appContent.querySelector('#group-tab-schedule');
+          const creditsTabPanel = appContent.querySelector('#group-tab-credits');
+          if (electiveTabBtn) electiveTabBtn.classList.add('active');
+          appContent.querySelectorAll('.group-tab[data-tab]').forEach(t => {
+            if (t !== electiveTabBtn) t.classList.remove('active');
+          });
+          if (electiveTabPanel) electiveTabPanel.style.display = '';
+          if (scheduleTabPanel) scheduleTabPanel.style.display = 'none';
+          if (creditsTabPanel) creditsTabPanel.style.display = 'none';
+          updateGameUI();
+        }
+      };
+    }
     // 绑定"回到标题"按钮
     const backTitleBtn = document.getElementById('btn-back-to-title');
     if (backTitleBtn) {
@@ -2083,20 +3766,20 @@ document.addEventListener('DOMContentLoaded', function() {
       const who = contact.dataset.contact;
       const panel = document.getElementById('chat-detail-panel');
       const msgs = {
-        'roommate-a': [
-          {t:'other', n:'室友A', m:'一起去图书馆吗？'},
-          {t:'me', m:'我正在寝室写代码'},
-          {t:'other', n:'室友A', m:'哦哦，那加油！💪'},
+        'roommate-xin': [
+          {t:'other', n:'老信', m:'高数作业写了吗？'},
+          {t:'me', m:'还没呢，正在写'},
+          {t:'other', n:'老信', m:'写完借我看看呗！🙏'},
         ],
-        'roommate-b': [
-          {t:'other', n:'室友B', m:'考试加油！💪'},
-          {t:'me', m:'谢谢！高数太难了'},
-          {t:'other', n:'室友B', m:'一起复习吧！'},
+        'roommate-wang': [
+          {t:'other', n:'老王', m:'要不要一起点外卖？凑满减'},
+          {t:'me', m:'好啊，我想吃黄焖鸡'},
+          {t:'other', n:'老王', m:'行，我来下单！'},
         ],
-        'roommate-c': [
-          {t:'other', n:'室友C', m:'食堂人好多...'},
-          {t:'me', m:'中午人太多了'},
-          {t:'other', n:'室友C', m:'要不叫外卖？'},
+        'roommate-tang': [
+          {t:'other', n:'老唐', m:'回来帮我带个饭呗'},
+          {t:'me', m:'你又不想下楼？'},
+          {t:'other', n:'老唐', m:'嘿嘿，拜托了兄弟🙏'},
         ],
         'mom': [
           {t:'other', n:'妈妈', m:'天冷了记得加衣服'},
@@ -2106,21 +3789,41 @@ document.addEventListener('DOMContentLoaded', function() {
       };
       const history = msgs[who] || [];
       if (panel) {
-        panel.innerHTML = '<div class="chat-detail-header">💬 与 ' + (who === 'mom' ? '妈妈' : who.replace('roommate-','室友')) + ' 的聊天</div><div class="chat-detail-msgs">' +
+        const contactNames = { 'roommate-xin': '老信', 'roommate-wang': '老王', 'roommate-tang': '老唐', 'mom': '妈妈' };
+        const displayName = contactNames[who] || who;
+        panel.innerHTML = '<div class="chat-detail-header">💬 与 ' + displayName + ' 的聊天</div><div class="chat-detail-msgs">' +
           history.map(m => `<div class="chat-bubble ${m.t==='me'?'bubble-me':'bubble-other'}"><span class="bubble-text">${m.n ? m.n+': ' : ''}${m.m}</span></div>`).join('') + '</div>';
       }
     }
-    // 电话拨打
-    if (e.target.classList.contains('call-btn')) {
-      const who = e.target.dataset.who;
-      const names = { 'roommate-a':'室友A','roommate-b':'室友B','roommate-c':'室友C','mom':'妈妈' };
-      openSimpleNotice('📞 正在呼叫 ' + (names[who] || who) + '...');
+    // 背包分页切换
+    if (e.target.classList.contains('bag-page-tab')) {
+      const p = parseInt(e.target.dataset.page, 10);
+      if (!isNaN(p) && currentGameData) {
+        currentGameData.bagPageIdx = p;
+        // 重新渲染背包界面
+        const info = APP_CONTENTS['bag'];
+        const appBody = document.getElementById('app-content-area');
+        if (appBody) appBody.innerHTML = info.html();
+        if (window.gameAudio) gameAudio.play('click');
+      }
+    }
+    // 背包格子点击（预留物品使用接口）
+    if (e.target.closest && e.target.closest('.bag-cell-filled')) {
+      const cellEl = e.target.closest('.bag-cell-filled');
+      const idx = parseInt(cellEl.dataset.idx, 10);
+      if (currentGameData && currentGameData.bagPages && currentGameData.bagPages[currentGameData.bagPageIdx || 0]) {
+        const cell = currentGameData.bagPages[currentGameData.bagPageIdx || 0][idx];
+        if (cell) {
+          openSimpleNotice(`${cell.icon || '📦'} ${cell.name} x${cell.count}\n${cell.desc || ''}`);
+        }
+      }
     }
   });
 
   bindClick('btn-app-close', () => {
     const appOverlay = document.getElementById('app-overlay');
     if (appOverlay) appOverlay.classList.remove('active');
+    if (window.gameAudio) gameAudio.play('close');
   });
 
   /* ==========================================================
@@ -2130,66 +3833,394 @@ document.addEventListener('DOMContentLoaded', function() {
     updateGameUI();
     const mapOverlay = document.getElementById('map-overlay');
     if (mapOverlay) mapOverlay.classList.add('active');
+    if (window.gameAudio) gameAudio.play('open');
   });
   bindClick('btn-map-close', () => {
     const mapOverlay = document.getElementById('map-overlay');
     if (mapOverlay) mapOverlay.classList.remove('active');
+    if (window.gameAudio) gameAudio.play('close');
   });
   document.querySelectorAll('.map-place').forEach(placeBtn => {
     placeBtn.addEventListener('click', () => {
       const place = placeBtn.dataset.place;
+      const implementedPlaces = ['dorm', 'teaching', 'outdoor'];
+      if (!implementedPlaces.includes(place)) {
+        const placeNames = {
+          canteen: '食堂',
+          library: '图书馆',
+          gym: '体育馆',
+          mall: '校园超市',
+          cafeteria: '咖啡厅'
+        };
+        openSimpleNotice(`🏗️ ${placeNames[place] || place} 敬请期待`);
+        if (window.gameAudio) gameAudio.play('error');
+        return;
+      }
       currentGameData.location = place;
+      const startPos = getSceneStartPos(place);
+      playerX = startPos.x;
+      playerY = startPos.y;
+      targetX = playerX;
+      targetY = playerY;
+      currentPath = [];
+      showXiaoguMenu = false;
+      showRoommateMenu = null;
+      generateSceneItems(place);
       updateGameUI();
       document.getElementById('map-overlay').classList.remove('active');
+      if (window.gameAudio) { gameAudio.init(); gameAudio.play('success'); }
     });
   });
 
   /* ==========================================================
      行动栏
   ========================================================== */
-  // 推进时间（amount 为整数时段数），内部处理 day 进位、遗忘惩罚、UI 更新
+  // 推进时间（amount 为整数时段数），内部处理 day 进位、遗忘惩罚、饥饿惩罚、UI 更新
   function advanceTime(amount) {
     const d = currentGameData;
     const prevDay = d.day;
-    d.timeSlot += amount;
-    while (d.timeSlot >= 6) {
-      d.timeSlot -= 6;
-      d.day++;
+    let healthLost = 0;
+    let missedMeals = [];
+
+    // 逐时段推进，检查每个餐点是否没吃
+    for (let i = 0; i < amount; i++) {
+      const currentSlot = d.timeSlot;
+      const currentDay = d.day;
+
+      // 推进一个时段
+      d.timeSlot++;
+      if (d.timeSlot >= 6) {
+        d.timeSlot = 0;
+        d.day++;
+        // 新的一天，重置三餐记录（前一天的晚餐在跨天时已检查过）
+        d.breakfastEaten = false;
+        d.lunchEaten = false;
+        d.dinnerEaten = false;
+      }
+
+      // 检查是否跳过了餐点（进入下一个时段后检查上一个餐点）
+      // 上午(0) -> 中午(1)：检查早餐是否吃了
+      if (d.timeSlot === 1 && !d.breakfastEaten) {
+        healthLost += 3;
+        missedMeals.push('早餐');
+      }
+      // 中午(1) -> 下午(2)：检查午餐是否吃了
+      if (d.timeSlot === 2 && !d.lunchEaten) {
+        healthLost += 3;
+        missedMeals.push('午餐');
+      }
+      // 傍晚(3) -> 夜晚(4)：检查晚餐是否吃了
+      if (d.timeSlot === 4 && !d.dinnerEaten) {
+        healthLost += 3;
+        missedMeals.push('晚餐');
+      }
     }
-    // 进天时检查遗忘惩罚
+
+    // 扣除健康值
+    if (healthLost > 0) {
+      d.health = Math.max(0, d.health - healthLost);
+    }
+
+    // 进天时检查遗忘惩罚和睡眠惩罚
     if (d.day > prevDay) {
+      const currentSemester = getSemesterIndex(d.day);
+      if (d.scheduleSemester !== currentSemester) {
+        d.schedule = generateSemesterSchedule(d.requiredCourseLoad || REQUIRED_COURSE_LOAD, d.electives || [], currentSemester);
+        d.scheduleSemester = currentSemester;
+        d._scheduleChanged = `📅 进入${getSemesterLabel(currentSemester)}，课程表已更新！课量保持 ${countScheduleCourses(d.schedule)} 节/周。`;
+      }
       if (d.day - d.lastStudyDay >= 2) {
         d.knowledge = Math.max(0, d.knowledge - 3);
       }
       if (d.day - d.lastCodeDay >= 2) {
         d.program = Math.max(0, d.program - 3);
       }
+      // 检查前一天是否睡过觉
+      if (d.lastSleepDay < prevDay) {
+        healthLost += 10;
+        missedMeals.push('睡觉');
+        d.health = Math.max(0, d.health - 10);
+      }
     }
-    // 跨天时遗忘惩罚已在上面处理
+
+    // 保存惩罚信息，供调用方显示
+    d._lastHealthLost = healthLost;
+    d._lastMissedMeals = missedMeals;
+    d._lastMissedSleep = d.day > prevDay && d.lastSleepDay < prevDay;
+
+    // 健康下降时播放警告音
+    if (healthLost > 0 && window.gameAudio) {
+      gameAudio.play('warn');
+    }
+
+    // 检查健康值是否为0，触发坏结局
+    if (d.health <= 0) {
+      d.health = 0;
+      updateGameUI();
+      gameOver();
+      return true; // 返回true表示游戏已结束
+    }
+
     updateGameUI();
+    return false; // 返回false表示游戏继续
+  }
+
+  // 游戏失败处理
+  function gameOver() {
+    if (!currentGameData) return;
+    stopGameLoop();
+    const failDays = document.getElementById('fail-days');
+    const failHealth = document.getElementById('fail-health');
+    if (failDays) failDays.textContent = currentGameData.day;
+    if (failHealth) failHealth.textContent = currentGameData.health;
+    if (window.gameAudio) gameAudio.play('fail');
+    showPage('fail');
+  }
+
+  // 与小谷对话
+  const XIAOGU_DIALOGUES = [
+    { xiaogu: '今天的食堂饭菜怎么样？我听说中午有糖醋排骨！', player: '还可以吧，就是排队太久了，差点迟到。' },
+    { xiaogu: '你有没有觉得高数课越来越难了？我上次都没听懂。', player: '确实，我也得多去图书馆补补课了。' },
+    { xiaogu: '最近图书馆人好多，你一般什么时候去啊？', player: '我通常傍晚去，那时候人少一点。' },
+    { xiaogu: '下周体育课要测800米，我好慌啊……', player: '哈哈别怕，我陪你一起跑！' },
+    { xiaogu: '你买了那本数据结构的教材吗？听说挺贵的。', player: '买了，确实不便宜，不过挺有用的。' },
+    { xiaogu: '昨天晚上寝室好吵，根本没睡好。', player: '我们寝室也是，室友打游戏到凌晨。' },
+    { xiaogu: '你觉得C语言难学吗？我总觉得指针搞不懂。', player: '刚开始确实难，多写代码就习惯了。' },
+    { xiaogu: '校园超市新出了一种面包，还挺好吃的！', player: '真的吗？下课我去买一个尝尝。' },
+    { xiaogu: '你有没有参加什么社团呀？', player: '还没呢，你有什么推荐吗？' },
+    { xiaogu: '今天天气真好，真想在操场上晒晒太阳。', player: '是啊，可惜下午还有课。' },
+    { xiaogu: '你平时几点起床啊？我总是踩点上课。', player: '我一般七点起，不过偶尔也会赖床。' },
+    { xiaogu: '听说这学期期末考试提前了，你开始复习了吗？', player: '啊？还没呢，得赶紧开始了。' },
+    { xiaogu: '实验楼的电脑太卡了，上次写代码差点崩溃。', player: '哈哈，我都是自己带笔记本去上课的。' },
+    { xiaogu: '你有没有觉得大学物理的公式太多了？', player: '确实，我都记不住，只能靠刷题了。' },
+    { xiaogu: '最近食堂的窗口换了新菜单，你试过吗？', player: '还没，中午一起去尝尝？' },
+    { xiaogu: '我昨天在图书馆借了一本小说，好好看！', player: '什么书？推荐给我呗。' },
+    { xiaogu: '你有没有觉得电路与电子学好难啊？', player: '太难了，我都快听不懂了。' },
+    { xiaogu: '下课后要不要一起去校园超市逛逛？', player: '好啊，正好我要买点东西。' },
+    { xiaogu: '你最近编程能力进步了不少呀！', player: '谢谢，多练练就好了。' },
+    { xiaogu: '今天的离散数学课你听懂了吗？', player: '勉强吧，有些地方还得回去琢磨。' }
+  ];
+
+  function talkToXiaogu() {
+    if (!currentGameData) return;
+    // 主角走向小谷面前（小谷在x=180，站在她右侧）
+    const targetPos = { x: 230, y: 470 };
+    const bounds = getSceneBounds();
+    const path = findPath(playerX, playerY, targetPos.x, targetPos.y, bounds);
+    if (path && path.length > 1) {
+      currentPath = path;
+      targetX = targetPos.x;
+      targetY = targetPos.y;
+    } else {
+      targetX = targetPos.x;
+      targetY = targetPos.y;
+      currentPath = [];
+    }
+
+    // 随机增加2-5点好感度
+    const favorGain = Math.floor(Math.random() * 4) + 2;
+    currentGameData.xiaoguFavor = Math.min(1000, (currentGameData.xiaoguFavor || 0) + favorGain);
+
+    // 走到后延迟显示对话
+    const dialogue = XIAOGU_DIALOGUES[Math.floor(Math.random() * XIAOGU_DIALOGUES.length)];
+    const walkDuration = 1200;
+    setTimeout(() => {
+      if (window.gameAudio) { gameAudio.play('talk'); gameAudio.play('favor'); }
+      const msg = `🐱 小谷：${dialogue.xiaogu}\n\n🧑 我：${dialogue.player}\n\n💕 小谷好感度 +${favorGain}（当前：${currentGameData.xiaoguFavor}）`;
+      openSimpleNotice(msg);
+    }, walkDuration);
+  }
+
+  // 与室友对话
+  const ROOMMATE_DIALOGUES = {
+    xin: [
+      { roommate: '兄弟，今天高数作业写了吗？借我参考一下呗。', player: '我还没写完呢，等我写完再说。' },
+      { roommate: '你有没有觉得食堂的饭菜越来越难吃了？', player: '还好吧，我比较不挑食。' },
+      { roommate: '昨晚打游戏打到凌晨三点，困死了。', player: '难怪你今天上课一直在打瞌睡。' },
+      { roommate: '这周末要不要一起去校外吃顿好的？', player: '行啊，我也想换换口味了。' },
+      { roommate: '你说数据结构到底怎么学啊？我完全听不懂。', player: '多刷题吧，我也在慢慢摸索。' },
+      { roommate: '今天体育课跑了一千米，腿都要断了。', player: '哈哈，你平时得多锻炼了。' },
+      { roommate: '你编程好厉害，能不能教教我？', player: '互相学习嘛，有问题随时问。' }
+    ],
+    wang: [
+      { roommate: '哟，今天又去图书馆了？真用功啊。', player: '没办法，快期末了得抓紧。' },
+      { roommate: '你有没有多余的充电线？我的坏了。', player: '我找找看，应该有一根。' },
+      { roommate: '今天英语课老师提问我，我啥都不会，尴尬死了。', player: '哈哈，下次记得预习一下。' },
+      { roommate: '要不要一起点外卖？凑个满减。', player: '好啊，你想吃什么？' },
+      { roommate: '我最近在追一部剧，超级好看！推荐你也看看。', player: '什么剧？说来听听。' },
+      { roommate: '寝室的Wi-Fi怎么这么卡啊？气死我了。', player: '可能是用的人太多了吧。' },
+      { roommate: '你说毕业以后我们能找到好工作吗？', player: '别想那么远，先把眼前的事做好。' }
+    ],
+    tang: [
+      { roommate: '哥们儿，帮我带个饭呗？我不想下楼了。', player: '行吧，你想吃什么？' },
+      { roommate: '今天电路与电子学课你听懂了吗？我全程懵。', player: '勉强吧，回去得再看看书。' },
+      { roommate: '你有没有 notice 到最近操场上人特别多？', player: '可能是天气好了大家都出来运动了。' },
+      { roommate: '我昨天在校园超市买到了打折的零食，超划算！', player: '真的吗？我也去看看。' },
+      { roommate: '下学期选课你打算选什么？', player: '还没想好，你有什么推荐吗？' },
+      { roommate: '你觉不觉得咱们宿管阿姨特别凶？', player: '还好吧，她也是为了咱们好。' },
+      { roommate: '今晚要不要一起开黑？好久没打游戏了。', player: '行啊，不过别打太晚。' }
+    ]
+  };
+
+  function talkToRoommate(key) {
+    if (!currentGameData) return;
+    const rm = ROOMMATES.find(r => r.key === key);
+    if (!rm) return;
+
+    // 走到室友附近
+    const targetPos = { x: rm.cx + (rm.cx < 200 ? 50 : -50), y: rm.feetY };
+    const bounds = getSceneBounds();
+    const path = findPath(playerX, playerY, targetPos.x, targetPos.y, bounds);
+    if (path && path.length > 1) {
+      currentPath = path;
+      targetX = targetPos.x;
+      targetY = targetPos.y;
+    } else {
+      targetX = targetPos.x;
+      targetY = targetPos.y;
+      currentPath = [];
+    }
+
+    // 随机增加2-5点好感度
+    const favorGain = Math.floor(Math.random() * 4) + 2;
+    if (!currentGameData.roommateFavors) currentGameData.roommateFavors = { xin: 0, wang: 0, tang: 0 };
+    currentGameData.roommateFavors[key] = Math.min(1000, (currentGameData.roommateFavors[key] || 0) + favorGain);
+
+    // 走到后延迟显示对话
+    const dialogues = ROOMMATE_DIALOGUES[key] || [];
+    const dialogue = dialogues[Math.floor(Math.random() * dialogues.length)];
+    const walkDuration = 1000;
+    setTimeout(() => {
+      if (window.gameAudio) { gameAudio.play('talk'); gameAudio.play('favor'); }
+      const msg = `🧑‍🤝‍🧑 ${rm.name}：${dialogue.roommate}\n\n🧑 我：${dialogue.player}\n\n💕 ${rm.name}好感度 +${favorGain}（当前：${currentGameData.roommateFavors[key]}）`;
+      openSimpleNotice(msg);
+    }, walkDuration);
+  }
+
+  // 上课（点击102教室门触发）
+  function attendClass() {
+    if (!currentGameData) return;
+    const d = currentGameData;
+    const dayOfWeek = (d.day - 1) % 7;
+
+    // 周末没有课
+    if (dayOfWeek >= 5) {
+      if (window.gameAudio) gameAudio.play('error');
+      openSimpleNotice('今天是周末，没有课哦~');
+      return;
+    }
+
+    const weekdayKey = ['周一', '周二', '周三', '周四', '周五'][dayOfWeek];
+    const daySchedule = (d.schedule || {})[weekdayKey] || [];
+
+    // 查找当前时段的课程
+    let course = null;
+    for (let i = 0; i < TIME_PERIODS.length; i++) {
+      if (TIME_PERIODS[i].slot === d.timeSlot && daySchedule[i]) {
+        course = daySchedule[i];
+        break;
+      }
+    }
+
+    if (!course) {
+      if (window.gameAudio) gameAudio.play('error');
+      openSimpleNotice('当前时段没有课~\n可以打开手机查看课程表');
+      return;
+    }
+
+    // 上课钟声
+    if (window.gameAudio) gameAudio.play('classBell');
+    const ts = TIME_SLOTS[d.timeSlot];
+
+    // 若上课跳过了中午时段，不会减健康值
+    if (d.timeSlot === 1) {
+      d.lunchEaten = true;
+    }
+
+    const isGameOver = advanceTime(1);
+    if (isGameOver) return;
+
+    let msg = `📚 上了一节${course.name}（${course.periodName}）\n地点：${course.loc}`;
+    if (d._lastMissedSleep) {
+      msg += '\n😫 昨晚没睡觉！健康 -10';
+    }
+    if (d._lastHealthLost > 0) {
+      msg += `\n😫 饿肚子了！健康 -${d._lastHealthLost}（没吃${d._lastMissedMeals.filter(m => m !== '睡觉').join('、')}）`;
+    }
+    openSimpleNotice(msg);
   }
 
   function doAction(type) {
     if (!currentGameData) return;
     const d = currentGameData;
     const ts = TIME_SLOTS[d.timeSlot];
+    let isGameOver = false;
+    // 播放对应音效
+    if (window.gameAudio) gameAudio.play(type);
 
     switch (type) {
       case 'rest':
-        advanceTime(2); // 休息跳过两个时段
-        openSimpleNotice(`😴 休息了一会儿（${ts}）\n跳过两个时段`);
+        let healthGain = 0;
+        if (d.timeSlot === 4 || d.timeSlot === 5) {
+          healthGain = 6;
+        } else {
+          healthGain = 4;
+        }
+        d.health = Math.min(100, d.health + healthGain);
+        d.lastSleepDay = d.day;
+
+        if (d.timeSlot === 5) {
+          // 深夜休息只跳到第二天上午
+          isGameOver = advanceTime(1);
+          if (isGameOver) return;
+          let msg = `😴 睡了一觉，天亮了！\n健康 +${healthGain}\n现在是${TIME_SLOTS[d.timeSlot]}，${WEEKDAYS[(d.day - 1) % 7]}`;
+          if (d._lastMissedSleep) {
+            msg += `\n😫 昨晚没睡觉！健康 -10`;
+          }
+          if (d._lastHealthLost > 0) {
+            msg += `\n😫 饿肚子了！健康 -${d._lastHealthLost}（没吃${d._lastMissedMeals.filter(m => m !== '睡觉').join('、')}）`;
+          }
+          openSimpleNotice(msg);
+        } else {
+          isGameOver = advanceTime(2); // 休息跳过两个时段
+          if (isGameOver) return;
+          let msg = `😴 休息了一会儿（${ts}）\n跳过两个时段\n健康 +${healthGain}`;
+          if (d._lastMissedSleep) {
+            msg += `\n😫 昨晚没睡觉！健康 -10`;
+          }
+          if (d._lastHealthLost > 0) {
+            msg += `\n😫 饿肚子了！健康 -${d._lastHealthLost}（没吃${d._lastMissedMeals.filter(m => m !== '睡觉').join('、')}）`;
+          }
+          openSimpleNotice(msg);
+        }
         break;
       case 'study':
         d.knowledge = Math.min(500, d.knowledge + 5);
         d.lastStudyDay = d.day;
-        advanceTime(1); // 学习度过一个时段
-        openSimpleNotice(`📖 努力学习（${ts}）\n知识储备 +5`);
+        isGameOver = advanceTime(1); // 学习度过一个时段
+        if (isGameOver) return;
+        let msgStudy = `📖 努力学习（${ts}）\n知识储备 +5`;
+        if (d._lastMissedSleep) {
+          msgStudy += `\n😫 昨晚没睡觉！健康 -10`;
+        }
+        if (d._lastHealthLost > 0) {
+          msgStudy += `\n😫 饿肚子了！健康 -${d._lastHealthLost}（没吃${d._lastMissedMeals.filter(m => m !== '睡觉').join('、')}）`;
+        }
+        openSimpleNotice(msgStudy);
         break;
       case 'code':
         d.program = Math.min(500, d.program + 5);
         d.lastCodeDay = d.day;
-        advanceTime(1); // 写代码度过一个时段
-        openSimpleNotice(`💻 写代码（${ts}）\n编程能力 +5`);
+        isGameOver = advanceTime(1); // 写代码度过一个时段
+        if (isGameOver) return;
+        let msgCode = `💻 写代码（${ts}）\n编程能力 +5`;
+        if (d._lastMissedSleep) {
+          msgCode += `\n😫 昨晚没睡觉！健康 -10`;
+        }
+        if (d._lastHealthLost > 0) {
+          msgCode += `\n😫 饿肚子了！健康 -${d._lastHealthLost}（没吃${d._lastMissedMeals.filter(m => m !== '睡觉').join('、')}）`;
+        }
+        openSimpleNotice(msgCode);
         break;
     }
   }
@@ -2201,22 +4232,34 @@ document.addEventListener('DOMContentLoaded', function() {
 
   bindClick('btn-next-time', () => {
     if (!currentGameData) return;
-    advanceTime(1);
+    if (window.gameAudio) gameAudio.play('tick');
+    const isGameOver = advanceTime(1);
+    if (isGameOver) return;
     if (currentGameData.day > 360) {
       openSimpleNotice('🎓 恭喜毕业！\n大学生活圆满结束！');
       stopGameLoop();
       showPage('cover');
       return;
     }
-    openSimpleNotice(`⏭️ 时间流逝……\n现在是${TIME_SLOTS[currentGameData.timeSlot]}，${WEEKDAYS[(currentGameData.day - 1) % 7]}`);
+    const d = currentGameData;
+    let msg = `⏭️ 时间流逝……\n现在是${TIME_SLOTS[d.timeSlot]}，${WEEKDAYS[(d.day - 1) % 7]}`;
+    if (d._lastMissedSleep) {
+      msg += `\n😫 昨晚没睡觉！健康 -10`;
+    }
+    if (d._lastHealthLost > 0) {
+      msg += `\n😫 饿肚子了！健康 -${d._lastHealthLost}（没吃${d._lastMissedMeals.filter(m => m !== '睡觉').join('、')}）`;
+    }
+    openSimpleNotice(msg);
   });
 
   bindClick('btn-game-save', () => {
     if (!currentGameSlot || !currentGameData) {
+      if (window.gameAudio) gameAudio.play('error');
       openSimpleNotice('请先进入游戏，再进行存档！');
       return;
     }
     saveToSlot(currentGameSlot);
+    if (window.gameAudio) gameAudio.play('save');
     openSimpleNotice(`💾 已保存到存档 ${currentGameSlot}！`);
   });
 

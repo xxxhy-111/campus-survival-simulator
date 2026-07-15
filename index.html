@@ -170,9 +170,9 @@
               <button id="btn-phone-close" class="phone-close" onclick="document.getElementById('phone-overlay').classList.remove('active')">✕</button>
             </div>
             <div class="phone-apps">
-              <button class="phone-app" data-app="calendar" onclick="openApp('calendar')">
-                <div class="app-icon">📅</div>
-                <div class="app-name">日历</div>
+              <button class="phone-app" data-app="baolema" onclick="openApp('baolema')">
+                <div class="app-icon">🍔</div>
+                <div class="app-name">饱了吗</div>
               </button>
               <button class="phone-app" data-app="group" onclick="openApp('group')">
                 <div class="app-icon">👥</div>
@@ -186,9 +186,9 @@
                 <div class="app-icon">💬</div>
                 <div class="app-name">聊天</div>
               </button>
-              <button class="phone-app" data-app="call" onclick="openApp('call')">
-                <div class="app-icon">📞</div>
-                <div class="app-name">电话</div>
+              <button class="phone-app" data-app="bag" onclick="openApp('bag')">
+                <div class="app-icon">🎒</div>
+                <div class="app-name">背包</div>
               </button>
               <button class="phone-app" data-app="settings" onclick="openApp('settings')">
                 <div class="app-icon">⚙️</div>
@@ -243,6 +243,23 @@
       <button class="action-btn action-btn-save" id="btn-game-save">💾 存档</button>
   </div>
 
+  <!-- ===================== 游戏失败页 ===================== -->
+  <div id="page-fail" class="page">
+    <div id="fail-container">
+      <div class="fail-icon">🏥</div>
+      <h1 class="fail-title">游戏结束</h1>
+      <div class="fail-reason">
+        <p>你生了一场大病，</p>
+        <p>迫不得已休学了……</p>
+      </div>
+      <div class="fail-stats">
+        <p>在科技大学度过了 <span id="fail-days">0</span> 天</p>
+        <p>最终健康值：<span id="fail-health">0</span></p>
+      </div>
+      <button class="pixel-btn" id="btn-fail-back-title">返回标题</button>
+    </div>
+  </div>
+
   <!-- ===================== 覆盖确认弹窗 ===================== -->
   <div id="modal-mask" class="modal-mask">
     <div class="modal-box">
@@ -255,6 +272,7 @@
     </div>
   </div>
 
-  <script src="scene.js"></script>
+  <script src="audio.js?v=6"></script>
+  <script src="scene.js?v=27"></script>
 </body>
 </html>

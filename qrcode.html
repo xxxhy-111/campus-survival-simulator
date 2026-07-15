@@ -35,10 +35,15 @@
     }
     .qrcode {
       margin: 20px 0;
+      background: #f0f0f0;
+      padding: 20px;
+      border-radius: 10px;
+      display: inline-block;
     }
     .qrcode img {
-      border: 8px solid #f0f0f0;
-      border-radius: 10px;
+      display: block;
+      width: 250px;
+      height: 250px;
     }
     .url {
       color: #667eea;
@@ -57,6 +62,11 @@
       font-size: 12px;
       margin-top: 30px;
     }
+    .tip {
+      color: #f59e0b;
+      font-size: 12px;
+      margin-top: 10px;
+    }
   </style>
 </head>
 <body>
@@ -65,11 +75,12 @@
     <p class="subtitle">科技大学篇 · 计算机系新生的逆袭</p>
     
     <div class="qrcode">
-      <img src="https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=https://xxxhy-111.github.io/campus-survival-simulator/" alt="游戏二维码">
+      <img src="https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=https%3A%2F%2Fxxxhy-111.github.io%2Fcampus-survival-simulator%2F" alt="游戏二维码">
     </div>
     
     <p class="url">https://xxxhy-111.github.io/campus-survival-simulator/</p>
     <p class="instruction">📱 扫描二维码访问游戏</p>
+    <p class="tip">💡 将二维码截图保存到简历中</p>
   </div>
   
   <p class="footer">校园生存模拟器 v1.0</p>
